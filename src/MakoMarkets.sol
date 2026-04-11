@@ -39,8 +39,8 @@ contract MakoMarkets {
     uint16 public constant MAX_TOTAL_FEE_BPS = 500;
     uint256 public constant MIN_BET = 0.001 ether;
     uint256 public constant MAX_DURATION = 7 days;
-    uint256 public constant MIN_LIQUIDITY_RATIO_BPS = 100; // losing side must be >= 1% of winning side for non-refund settlement
     uint256 public constant RESOLUTION_GRACE = 24 hours;   // anyone can forceRefund after closeTime + this
+    uint256 public constant MIN_RATIO_FLOOR_BPS = 100;     // hard floor under the dynamic threshold
 
     uint256 private _locked;
 
@@ -137,12 +137,14 @@ contract MakoMarkets {
         if (outcome == Outcome.UNRESOLVED) revert BadOutcome();
 
         // Force refund if the pool is too one-sided to settle honestly.
-        // Kills the dust-bet grief where a tiny opposing bet unlocks fee extraction
-        // on what should have been a refundable market. Threshold: smaller side must
-        // be >= 1% of the larger side (MIN_LIQUIDITY_RATIO_BPS).
+        // The threshold is DYNAMIC — it must strictly dominate the creator-fee break-even
+        // so a creator cannot profit from self-dust-betting the losing side to unlock the
+        // creator-fee payout. See minLiquidityRatioBps() — 2x break-even as safety margin,
+        // floored at MIN_RATIO_FLOOR_BPS.
         uint256 minSide = m.totalYes < m.totalNo ? m.totalYes : m.totalNo;
         uint256 maxSide = m.totalYes < m.totalNo ? m.totalNo : m.totalYes;
-        if (minSide * 10000 < maxSide * MIN_LIQUIDITY_RATIO_BPS) {
+        uint256 minRatio = minLiquidityRatioBps();
+        if (minSide * 10000 < maxSide * minRatio) {
             outcome = Outcome.REFUND;
         }
 
@@ -266,6 +268,20 @@ contract MakoMarkets {
         uint256 feeBps = protocolFeeBps + creatorFeeBps;
         uint256 payoutPool = totalPool - (totalPool * feeBps / 10000);
         return (payoutPool * 1e18) / winnerPool;
+    }
+
+    /// @notice Minimum smaller-side / larger-side ratio (in bps) required for non-refund settlement.
+    /// @dev Dynamically tracks creatorFeeBps. Anything at-or-below the break-even ratio
+    ///      `creatorFeeBps / (10000 - creatorFeeBps)` would let a creator-attacker self-dust-bet
+    ///      the losing side for positive net via claimCreatorFee. We use 2x break-even as a
+    ///      safety margin, floored at MIN_RATIO_FLOOR_BPS so zero-creator-fee markets still
+    ///      reject truly dust-thin counterparties.
+    function minLiquidityRatioBps() public view returns (uint256) {
+        uint256 cBps = uint256(creatorFeeBps);
+        if (cBps == 0) return MIN_RATIO_FLOOR_BPS;
+        uint256 breakevenBps = (10000 * cBps) / (10000 - cBps);
+        uint256 safeBps = 2 * breakevenBps;
+        return safeBps > MIN_RATIO_FLOOR_BPS ? safeBps : MIN_RATIO_FLOOR_BPS;
     }
 
     // -----------------------------------------------------------------------

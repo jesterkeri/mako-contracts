@@ -259,16 +259,16 @@ contract MakoMarketsTest is Test {
     }
 
     // ------------------------------------------------------------------
-    // 11. Pool exactly at 1% threshold settles normally (no false-positive refunds)
+    // 11. Pool clearly above the dynamic threshold settles normally
     // ------------------------------------------------------------------
-    function test_balancedPool_atThreshold_settles() public {
+    function test_aboveDynamicThreshold_settles() public {
         uint256 id = _createCryptoMarket();
 
         vm.prank(alice);
         mako.placeBet{value: 60 ether}(id, true);
-        // Bob places exactly 1% of YES side = 0.6 MON → at threshold, should settle.
+        // Bob places 3% of YES side = 1.8 MON, clearly above the ~2.02% dynamic threshold.
         vm.prank(bob);
-        mako.placeBet{value: 0.6 ether}(id, false);
+        mako.placeBet{value: 1.8 ether}(id, false);
 
         vm.warp(block.timestamp + 2 hours);
         mako.resolveMarket(id, MakoMarkets.Outcome.YES);
@@ -276,12 +276,11 @@ contract MakoMarketsTest is Test {
         MakoMarkets.Market memory m = mako.getMarket(id);
         assertEq(uint8(m.outcome), uint8(MakoMarkets.Outcome.YES));
 
-        // Alice still gets paid normally (after fees on the 60.6 MON pool)
+        // Alice payout: 60 * (61.8 * 0.97) / 60 = 61.8 * 0.97 = 59.946 MON
         uint256 aliceBefore = alice.balance;
         vm.prank(alice);
         mako.claim(id);
-        // payout = 60 * (60.6 * 0.97) / 60 = 60.6 * 0.97 = 58.782 MON
-        assertApproxEqAbs(alice.balance - aliceBefore, 58.782 ether, 1e12);
+        assertApproxEqAbs(alice.balance - aliceBefore, 59.946 ether, 1e12);
     }
 
     // ------------------------------------------------------------------
@@ -326,6 +325,99 @@ contract MakoMarketsTest is Test {
         // Cannot forceRefund again — already resolved
         vm.expectRevert(MakoMarkets.AlreadyResolved.selector);
         mako.forceRefund(id);
+    }
+
+    // ------------------------------------------------------------------
+    // 13. Pool below the dynamic threshold → forced refund
+    // ------------------------------------------------------------------
+    function test_belowDynamicThreshold_refunds() public {
+        uint256 id = _createCryptoMarket();
+
+        vm.prank(alice);
+        mako.placeBet{value: 60 ether}(id, true);
+        // Bob places 1.67% of YES side = 1 MON, BELOW the ~2.02% dynamic threshold.
+        vm.prank(bob);
+        mako.placeBet{value: 1 ether}(id, false);
+
+        vm.warp(block.timestamp + 2 hours);
+        mako.resolveMarket(id, MakoMarkets.Outcome.YES);
+
+        // Too-thin opposing liquidity → forced REFUND
+        MakoMarkets.Market memory m = mako.getMarket(id);
+        assertEq(uint8(m.outcome), uint8(MakoMarkets.Outcome.REFUND));
+
+        // Both sides get stakes back, no fees taken
+        uint256 aliceBefore = alice.balance;
+        vm.prank(alice);
+        mako.claim(id);
+        assertEq(alice.balance - aliceBefore, 60 ether);
+
+        uint256 bobBefore = bob.balance;
+        vm.prank(bob);
+        mako.claim(id);
+        assertEq(bob.balance - bobBefore, 1 ether);
+
+        assertEq(mako.treasuryBalance(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // 14. Creator-as-attacker profitability check (Codex round 2)
+    // ------------------------------------------------------------------
+    // At exactly the dynamic threshold, a creator who self-dust-bets the losing side
+    // must end up with a NEGATIVE net P&L even after claiming the creator fee.
+    function test_creatorAttacker_isUnprofitable_atThreshold() public {
+        // Carol is the market creator (and the attacker)
+        vm.prank(carol);
+        uint256 id = mako.createMarket(
+            MakoMarkets.MarketType.ADHOC,
+            bytes32(0),
+            uint64(block.timestamp + 1 hours),
+            "Will the next speaker say 'throughput'?"
+        );
+
+        // Alice places a legit 60 MON on YES
+        vm.prank(alice);
+        mako.placeBet{value: 60 ether}(id, true);
+
+        // Record Carol's balance BEFORE she executes the attack
+        uint256 carolInitial = carol.balance;
+
+        // Carol plants a bet at EXACTLY the dynamic threshold on the losing side.
+        // This is the most profitable attack point — if she's unprofitable here,
+        // she's unprofitable everywhere above the threshold too.
+        uint256 threshold = mako.minLiquidityRatioBps();
+        uint256 carolBet = (60 ether * threshold) / 10000; // ~1.212 MON at 202 bps
+        vm.prank(carol);
+        mako.placeBet{value: carolBet}(id, false);
+
+        // Market settles — we're AT the threshold, not below.
+        vm.warp(block.timestamp + 2 hours);
+        mako.resolveMarket(id, MakoMarkets.Outcome.YES);
+        MakoMarkets.Market memory m = mako.getMarket(id);
+        assertEq(uint8(m.outcome), uint8(MakoMarkets.Outcome.YES));
+
+        // Carol claims her creator fee — her only non-zero revenue from the attack.
+        vm.prank(carol);
+        mako.claimCreatorFee(id);
+
+        // Carol cannot claim() anything — she bet on the losing side.
+        vm.prank(carol);
+        vm.expectRevert(MakoMarkets.NoPosition.selector);
+        mako.claim(id);
+
+        // Net P&L must be strictly negative. At 2x break-even, she loses ~1% of X ≈ 0.6 MON.
+        uint256 carolFinal = carol.balance;
+        assertLt(carolFinal, carolInitial);
+        uint256 netLoss = carolInitial - carolFinal;
+        assertGt(netLoss, 0.5 ether); // loses at least 0.5 MON — attack is a money pit
+    }
+
+    // ------------------------------------------------------------------
+    // 15. minLiquidityRatioBps math spot-check
+    // ------------------------------------------------------------------
+    function test_minLiquidityRatioBps_math() public view {
+        // Default creatorFeeBps = 100 → breakeven = 100*10000/9900 = 101 → 2x = 202 bps
+        assertEq(mako.minLiquidityRatioBps(), 202);
     }
 
     // Allow this test contract to receive MON refunds / payouts from its setUp-deployed mako.
