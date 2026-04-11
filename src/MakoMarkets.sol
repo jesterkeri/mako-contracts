@@ -4,8 +4,17 @@ pragma solidity ^0.8.24;
 /// @title MakoMarkets — short-form parimutuel prediction markets
 /// @notice YES/NO pools. Market types: FOOTBALL, CRYPTO, ADHOC. Fees split to creator + treasury.
 contract MakoMarkets {
-    enum MarketType { FOOTBALL, CRYPTO, ADHOC }
-    enum Outcome { UNRESOLVED, YES, NO, REFUND }
+    enum MarketType {
+        FOOTBALL,
+        CRYPTO,
+        ADHOC
+    }
+    enum Outcome {
+        UNRESOLVED,
+        YES,
+        NO,
+        REFUND
+    }
 
     struct Market {
         address creator;
@@ -35,16 +44,23 @@ contract MakoMarkets {
     uint256 public treasuryBalance;
 
     uint16 public protocolFeeBps = 200; // 2%
-    uint16 public creatorFeeBps  = 100; // 1%
+    uint16 public creatorFeeBps = 100; // 1%
     uint16 public constant MAX_TOTAL_FEE_BPS = 500;
     uint256 public constant MIN_BET = 0.001 ether;
     uint256 public constant MAX_DURATION = 7 days;
-    uint256 public constant RESOLUTION_GRACE = 24 hours;   // anyone can forceRefund after closeTime + this
-    uint256 public constant MIN_RATIO_FLOOR_BPS = 100;     // hard floor under the dynamic threshold
+    uint256 public constant RESOLUTION_GRACE = 24 hours; // anyone can forceRefund after closeTime + this
+    uint256 public constant MIN_RATIO_FLOOR_BPS = 100; // hard floor under the dynamic threshold
 
     uint256 private _locked;
 
-    event MarketCreated(uint256 indexed id, address indexed creator, MarketType mType, bytes32 oracleRef, uint64 closeTime, string question);
+    event MarketCreated(
+        uint256 indexed id,
+        address indexed creator,
+        MarketType mType,
+        bytes32 oracleRef,
+        uint64 closeTime,
+        string question
+    );
     event BetPlaced(uint256 indexed id, address indexed user, bool isYes, uint256 amount);
     event MarketResolved(uint256 indexed id, Outcome outcome);
     event Claimed(uint256 indexed id, address indexed user, uint256 amount);
@@ -71,9 +87,20 @@ contract MakoMarkets {
     error ZeroAddress();
     error StillInGrace();
 
-    modifier onlyOwner() { if (msg.sender != owner) revert NotOwner(); _; }
-    modifier onlyResolver() { if (msg.sender != resolver && msg.sender != owner) revert NotResolver(); _; }
-    modifier nonReentrant() { if (_locked == 1) revert Reentrancy(); _locked = 1; _; _locked = 0; }
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert NotOwner();
+        _;
+    }
+    modifier onlyResolver() {
+        if (msg.sender != resolver && msg.sender != owner) revert NotResolver();
+        _;
+    }
+    modifier nonReentrant() {
+        if (_locked == 1) revert Reentrancy();
+        _locked = 1;
+        _;
+        _locked = 0;
+    }
 
     constructor(address _treasury) {
         if (_treasury == address(0)) revert ZeroAddress();
@@ -86,12 +113,10 @@ contract MakoMarkets {
     // Lifecycle
     // -----------------------------------------------------------------------
 
-    function createMarket(
-        MarketType mType,
-        bytes32 oracleRef,
-        uint64 closeTime,
-        string calldata question
-    ) external returns (uint256 id) {
+    function createMarket(MarketType mType, bytes32 oracleRef, uint64 closeTime, string calldata question)
+        external
+        returns (uint256 id)
+    {
         if (closeTime <= block.timestamp) revert BadCloseTime();
         if (closeTime > block.timestamp + MAX_DURATION) revert BadCloseTime();
         uint256 qLen = bytes(question).length;
@@ -194,7 +219,7 @@ contract MakoMarkets {
         }
 
         claimed[id][msg.sender] = true;
-        (bool ok, ) = msg.sender.call{value: payout}("");
+        (bool ok,) = msg.sender.call{value: payout}("");
         if (!ok) revert TransferFailed();
         emit Claimed(id, msg.sender, payout);
     }
@@ -210,7 +235,7 @@ contract MakoMarkets {
         uint256 totalPool = m.totalYes + m.totalNo;
         uint256 fee = (totalPool * creatorFeeBps) / 10000;
 
-        (bool ok, ) = msg.sender.call{value: fee}("");
+        (bool ok,) = msg.sender.call{value: fee}("");
         if (!ok) revert TransferFailed();
         emit CreatorFeePaid(id, msg.sender, fee);
     }
@@ -219,7 +244,7 @@ contract MakoMarkets {
         if (msg.sender != treasury && msg.sender != owner) revert NotAuthorized();
         uint256 bal = treasuryBalance;
         treasuryBalance = 0;
-        (bool ok, ) = treasury.call{value: bal}("");
+        (bool ok,) = treasury.call{value: bal}("");
         if (!ok) revert TransferFailed();
         emit TreasuryWithdrawn(bal);
     }
@@ -232,26 +257,18 @@ contract MakoMarkets {
         return markets[id];
     }
 
-    function getUserBet(uint256 id, address user)
-        external
-        view
-        returns (uint256 yes, uint256 no, bool hasClaimed)
-    {
+    function getUserBet(uint256 id, address user) external view returns (uint256 yes, uint256 no, bool hasClaimed) {
         return (yesBets[id][user], noBets[id][user], claimed[id][user]);
     }
 
     /// @notice Live payout preview for the bet sheet. Accounts for the new bet entering the pool.
-    function previewPayout(uint256 id, bool isYes, uint256 betAmount)
-        external
-        view
-        returns (uint256)
-    {
+    function previewPayout(uint256 id, bool isYes, uint256 betAmount) external view returns (uint256) {
         if (betAmount == 0) return 0;
         Market storage m = markets[id];
         uint256 newYes = m.totalYes + (isYes ? betAmount : 0);
-        uint256 newNo  = m.totalNo  + (isYes ? 0 : betAmount);
+        uint256 newNo = m.totalNo + (isYes ? 0 : betAmount);
         uint256 winnerPool = isYes ? newYes : newNo;
-        uint256 loserPool  = isYes ? newNo  : newYes;
+        uint256 loserPool = isYes ? newNo : newYes;
         if (loserPool == 0) return betAmount; // would refund
         uint256 totalPool = winnerPool + loserPool;
         uint256 feeBps = protocolFeeBps + creatorFeeBps;
@@ -288,7 +305,9 @@ contract MakoMarkets {
     // Admin
     // -----------------------------------------------------------------------
 
-    function setResolver(address r) external onlyOwner { resolver = r; }
+    function setResolver(address r) external onlyOwner {
+        resolver = r;
+    }
 
     function setTreasury(address t) external onlyOwner {
         if (t == address(0)) revert ZeroAddress();
@@ -310,11 +329,7 @@ contract MakoMarkets {
     // Internal
     // -----------------------------------------------------------------------
 
-    function _calcPayout(uint256 winnerPool, uint256 loserPool, uint256 userBet)
-        internal
-        view
-        returns (uint256)
-    {
+    function _calcPayout(uint256 winnerPool, uint256 loserPool, uint256 userBet) internal view returns (uint256) {
         uint256 totalPool = winnerPool + loserPool;
         uint256 feeBps = protocolFeeBps + creatorFeeBps;
         uint256 payoutPool = totalPool - (totalPool * feeBps / 10000);

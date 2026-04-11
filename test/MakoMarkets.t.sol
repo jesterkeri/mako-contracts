@@ -6,15 +6,15 @@ import {MakoMarkets} from "../src/MakoMarkets.sol";
 
 contract MakoMarketsTest is Test {
     MakoMarkets mako;
-    address alice    = address(0xA11CE);
-    address bob      = address(0xB0B);
-    address carol    = address(0xCA401);
+    address alice = address(0xA11CE);
+    address bob = address(0xB0B);
+    address carol = address(0xCA401);
     address treasury = address(0x7);
 
     function setUp() public {
         mako = new MakoMarkets(treasury);
         vm.deal(alice, 100 ether);
-        vm.deal(bob,   100 ether);
+        vm.deal(bob, 100 ether);
         vm.deal(carol, 100 ether);
     }
 
@@ -43,7 +43,7 @@ contract MakoMarketsTest is Test {
         uint256 id = _createCryptoMarket();
 
         vm.prank(alice);
-        mako.placeBet{value: 60 ether}(id, true);  // YES
+        mako.placeBet{value: 60 ether}(id, true); // YES
         vm.prank(bob);
         mako.placeBet{value: 40 ether}(id, false); // NO
 

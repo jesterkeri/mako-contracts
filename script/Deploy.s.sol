@@ -6,7 +6,7 @@ import {MakoMarkets} from "../src/MakoMarkets.sol";
 
 contract Deploy is Script {
     function run() external returns (MakoMarkets mako) {
-        uint256 pk       = vm.envUint("PRIVATE_KEY");
+        uint256 pk = vm.envUint("PRIVATE_KEY");
         address treasury = vm.envAddress("TREASURY");
 
         vm.startBroadcast(pk);
