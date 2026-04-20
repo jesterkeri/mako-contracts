@@ -2,12 +2,15 @@
 pragma solidity ^0.8.24;
 
 /// @title MakoMarkets — short-form parimutuel prediction markets
-/// @notice YES/NO pools. Market types: FOOTBALL, CRYPTO, ADHOC. Fees split to creator + treasury.
+/// @notice YES/NO pools. Market types: FOOTBALL, CRYPTO, BASKETBALL.
+/// @dev Fees split to creator + treasury. New market types must be appended
+///      at the end — reordering this enum would silently remap every stored
+///      mType value in state.
 contract MakoMarkets {
     enum MarketType {
         FOOTBALL,
         CRYPTO,
-        ADHOC
+        BASKETBALL
     }
     enum Outcome {
         UNRESOLVED,

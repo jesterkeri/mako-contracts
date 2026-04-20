@@ -36,6 +36,15 @@ contract MakoMarketsTest is Test {
         );
     }
 
+    function _createBasketballMarket() internal returns (uint256 id) {
+        id = mako.createMarket(
+            MakoMarkets.MarketType.BASKETBALL,
+            bytes32("18923:home_win:0"),
+            uint64(block.timestamp + 3 hours),
+            "Will the Lakers beat the Celtics?"
+        );
+    }
+
     // ------------------------------------------------------------------
     // 1. Happy path: create + bet + resolve + claim
     // ------------------------------------------------------------------
@@ -139,13 +148,13 @@ contract MakoMarketsTest is Test {
     // ------------------------------------------------------------------
     // 6. Creator fee accrues + is claimable once
     // ------------------------------------------------------------------
-    function test_creatorFee_adhoc() public {
+    function test_creatorFee_creatorCreatedMarket() public {
         vm.prank(carol);
         uint256 id = mako.createMarket(
-            MakoMarkets.MarketType.ADHOC,
-            bytes32(0),
+            MakoMarkets.MarketType.BASKETBALL,
+            bytes32("18923:home_win:0"),
             uint64(block.timestamp + 1 hours),
-            "Will the next speaker say 'throughput'?"
+            "Will the Lakers beat the Celtics?"
         );
 
         vm.prank(alice);
@@ -369,10 +378,10 @@ contract MakoMarketsTest is Test {
         // Carol is the market creator (and the attacker)
         vm.prank(carol);
         uint256 id = mako.createMarket(
-            MakoMarkets.MarketType.ADHOC,
-            bytes32(0),
+            MakoMarkets.MarketType.BASKETBALL,
+            bytes32("18923:home_win:0"),
             uint64(block.timestamp + 1 hours),
-            "Will the next speaker say 'throughput'?"
+            "Will the Lakers beat the Celtics?"
         );
 
         // Alice places a legit 60 MON on YES
@@ -418,6 +427,40 @@ contract MakoMarketsTest is Test {
     function test_minLiquidityRatioBps_math() public view {
         // Default creatorFeeBps = 100 → breakeven = 100*10000/9900 = 101 → 2x = 202 bps
         assertEq(mako.minLiquidityRatioBps(), 202);
+    }
+
+    // ------------------------------------------------------------------
+    // 16. Basketball market is just a different enum value — same flow
+    // ------------------------------------------------------------------
+    function test_basketballMarket_happyPath() public {
+        uint256 id = _createBasketballMarket();
+        MakoMarkets.Market memory m = mako.getMarket(id);
+        assertEq(uint8(m.mType), uint8(MakoMarkets.MarketType.BASKETBALL));
+
+        vm.prank(alice);
+        mako.placeBet{value: 60 ether}(id, true);
+        vm.prank(bob);
+        mako.placeBet{value: 40 ether}(id, false);
+
+        vm.warp(block.timestamp + 4 hours);
+        mako.resolveMarket(id, MakoMarkets.Outcome.YES);
+
+        uint256 before_ = alice.balance;
+        vm.prank(alice);
+        mako.claim(id);
+        assertEq(alice.balance - before_, 97 ether);
+    }
+
+    // ------------------------------------------------------------------
+    // 17. Enum ordering is append-only — existing values don't shift
+    // ------------------------------------------------------------------
+    // Guards against anyone reordering the enum and silently remapping
+    // on-chain state. If this ever fails, every existing `mType` in
+    // storage is pointing at the wrong sport.
+    function test_enumOrdering_isStable() public pure {
+        assertEq(uint8(MakoMarkets.MarketType.FOOTBALL), 0);
+        assertEq(uint8(MakoMarkets.MarketType.CRYPTO), 1);
+        assertEq(uint8(MakoMarkets.MarketType.BASKETBALL), 2);
     }
 
     // Allow this test contract to receive MON refunds / payouts from its setUp-deployed mako.
