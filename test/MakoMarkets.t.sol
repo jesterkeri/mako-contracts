@@ -168,7 +168,7 @@ contract MakoMarketsTest is Test {
         uint256 before_ = carol.balance;
         vm.prank(carol);
         mako.claimCreatorFee(id);
-        assertEq(carol.balance - before_, 1 ether); // 1% of 100
+        assertEq(carol.balance - before_, 2 ether); // 2% of 100
 
         // second claim reverts
         vm.prank(carol);
@@ -187,7 +187,7 @@ contract MakoMarketsTest is Test {
         mako.placeBet{value: 40 ether}(id, false);
         vm.warp(block.timestamp + 2 hours);
         mako.resolveMarket(id, MakoMarkets.Outcome.YES);
-        assertEq(mako.treasuryBalance(), 2 ether); // 2% of 100
+        assertEq(mako.treasuryBalance(), 1 ether); // 1% of 100
     }
 
     // ------------------------------------------------------------------
@@ -275,9 +275,10 @@ contract MakoMarketsTest is Test {
 
         vm.prank(alice);
         mako.placeBet{value: 60 ether}(id, true);
-        // Bob places 3% of YES side = 1.8 MON, clearly above the ~2.02% dynamic threshold.
+        // Bob places 5% of YES side = 3 MON, clearly above the ~4.08% dynamic
+        // threshold at the current 2% creator fee.
         vm.prank(bob);
-        mako.placeBet{value: 1.8 ether}(id, false);
+        mako.placeBet{value: 3 ether}(id, false);
 
         vm.warp(block.timestamp + 2 hours);
         mako.resolveMarket(id, MakoMarkets.Outcome.YES);
@@ -285,11 +286,11 @@ contract MakoMarketsTest is Test {
         MakoMarkets.Market memory m = mako.getMarket(id);
         assertEq(uint8(m.outcome), uint8(MakoMarkets.Outcome.YES));
 
-        // Alice payout: 60 * (61.8 * 0.97) / 60 = 61.8 * 0.97 = 59.946 MON
+        // Alice payout: 60 * (63 * 0.97) / 60 = 63 * 0.97 = 61.11 MON
         uint256 aliceBefore = alice.balance;
         vm.prank(alice);
         mako.claim(id);
-        assertApproxEqAbs(alice.balance - aliceBefore, 59.946 ether, 1e12);
+        assertApproxEqAbs(alice.balance - aliceBefore, 61.11 ether, 1e12);
     }
 
     // ------------------------------------------------------------------
@@ -425,8 +426,8 @@ contract MakoMarketsTest is Test {
     // 15. minLiquidityRatioBps math spot-check
     // ------------------------------------------------------------------
     function test_minLiquidityRatioBps_math() public view {
-        // Default creatorFeeBps = 100 → breakeven = 100*10000/9900 = 101 → 2x = 202 bps
-        assertEq(mako.minLiquidityRatioBps(), 202);
+        // Default creatorFeeBps = 200 → breakeven = 200*10000/9800 = 204 → 2x = 408 bps
+        assertEq(mako.minLiquidityRatioBps(), 408);
     }
 
     // ------------------------------------------------------------------

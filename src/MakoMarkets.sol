@@ -46,8 +46,8 @@ contract MakoMarkets {
     address public treasury;
     uint256 public treasuryBalance;
 
-    uint16 public protocolFeeBps = 200; // 2%
-    uint16 public creatorFeeBps = 100; // 1%
+    uint16 public protocolFeeBps = 100; // 1%
+    uint16 public creatorFeeBps = 200; // 2%
     uint16 public constant MAX_TOTAL_FEE_BPS = 500;
     uint256 public constant MIN_BET = 0.001 ether;
     uint256 public constant MAX_DURATION = 7 days;
