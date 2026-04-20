@@ -8,10 +8,10 @@ Built for **Monad Blitz Lagos** — April 11, 2026.
 
 A single Solidity contract (`MakoMarkets.sol`) that lets anyone:
 
-- **Create** a YES/NO prediction market (football fixture, crypto price, or ad-hoc)
+- **Create** a YES/NO prediction market (football fixture, crypto price, or NBA game)
 - **Bet** native MON on either side until `closeTime`
-- **Resolve** the market via an off-chain resolver (football-data.org, CoinGecko, or admin)
-- **Claim** winnings — pool is split parimutuel-style, minus 2% protocol fee and 1% creator fee
+- **Resolve** the market via an off-chain resolver
+- **Claim** winnings — pool is split parimutuel-style, minus 1% protocol fee and 2% creator fee
 
 Zero external dependencies. No OpenZeppelin, no oracles wired in. Pure EVM.
 
@@ -29,11 +29,11 @@ One-sided pools (nobody took the other side) auto-refund all bettors — no fees
 
 ## Market types
 
-| Type      | `oracleRef` encoding                      | Resolved by                  |
-|-----------|-------------------------------------------|------------------------------|
-| FOOTBALL  | `matchId:qType:param` (bytes32 utf-8)     | off-chain cron + football-data.org |
-| CRYPTO    | `symbol:direction:strike`                 | off-chain cron + CoinGecko   |
-| ADHOC     | `bytes32(0)`                              | market creator / admin       |
+| Type       | `oracleRef` encoding                      | Resolved by                  |
+|------------|-------------------------------------------|------------------------------|
+| FOOTBALL   | `matchId:qType:param` (bytes32 utf-8)     | off-chain resolver           |
+| CRYPTO     | `symbol:direction:strike`                 | off-chain resolver           |
+| BASKETBALL | `gameId:qType:param`                      | off-chain resolver           |
 
 ## Usage
 
@@ -56,7 +56,7 @@ forge script script/Deploy.s.sol:Deploy \
 
 ## Test coverage
 
-9 tests covering the full lifecycle, the math, access control, and the most exploitable edge cases:
+17 tests covering the full lifecycle, the math, access control, and the most exploitable edge cases:
 
 - Happy path: create → bet → resolve → claim
 - Parimutuel math matches spec to 12-decimal precision on a 60/40 split
@@ -64,9 +64,12 @@ forge script script/Deploy.s.sol:Deploy \
 - Double-claim reverts (both `claim` and `claimCreatorFee`)
 - Bet after `closeTime` reverts
 - Non-resolver cannot resolve
-- Treasury accrues exactly 2%
-- Creator fee is exactly 1%
-- Football markets run the same codepath as crypto
+- Treasury accrues exactly 1%
+- Creator fee is exactly 2%
+- Dynamic dust-attack threshold: below-floor pools auto-refund; above-floor settle
+- Force-refund safety valve after the 24h grace window
+- `minLiquidityRatioBps` math spot-check at the current creator fee
+- Football, crypto, and basketball markets run the same codepath
 
 ## License
 
