@@ -319,11 +319,7 @@ contract MakoMarketsV4 {
     ///         returned `resolutionTime` for sports would let naive
     ///         integrators reintroduce the "no sports cutoff" bug by
     ///         trusting the helper blindly.
-    function suggestedCryptoBettingCloseTime(uint64 createdAt, uint64 resolutionTime)
-        external
-        pure
-        returns (uint64)
-    {
+    function suggestedCryptoBettingCloseTime(uint64 createdAt, uint64 resolutionTime) external pure returns (uint64) {
         if (resolutionTime <= createdAt) return createdAt;
         uint64 duration = resolutionTime - createdAt;
         uint64 pct;
@@ -465,34 +461,18 @@ contract MakoMarketsV4 {
             // - creatorFee). Otherwise the creator's forgone slice would sit
             // stranded in the contract's pooled USDC and silently leak into
             // future markets' balances.
-            uint16 effectiveCreatorFee = _isCreatorFeeForfeited(
-                m.totalYes,
-                m.totalNo,
-                m.creatorFeeBpsSnapshot
-            )
+            uint16 effectiveCreatorFee = _isCreatorFeeForfeited(m.totalYes, m.totalNo, m.creatorFeeBpsSnapshot)
                 ? uint16(0)
                 : m.creatorFeeBpsSnapshot;
 
             if (m.outcome == Outcome.YES) {
                 uint256 userBet = yesBets[id][msg.sender];
                 if (userBet == 0) revert NoPosition();
-                payout = _calcPayout(
-                    m.totalYes,
-                    m.totalNo,
-                    userBet,
-                    m.protocolFeeBpsSnapshot,
-                    effectiveCreatorFee
-                );
+                payout = _calcPayout(m.totalYes, m.totalNo, userBet, m.protocolFeeBpsSnapshot, effectiveCreatorFee);
             } else {
                 uint256 userBet = noBets[id][msg.sender];
                 if (userBet == 0) revert NoPosition();
-                payout = _calcPayout(
-                    m.totalNo,
-                    m.totalYes,
-                    userBet,
-                    m.protocolFeeBpsSnapshot,
-                    effectiveCreatorFee
-                );
+                payout = _calcPayout(m.totalNo, m.totalYes, userBet, m.protocolFeeBpsSnapshot, effectiveCreatorFee);
             }
         } else {
             revert BadOutcome();
@@ -567,9 +547,8 @@ contract MakoMarketsV4 {
         uint256 loserPool = isYes ? newNo : newYes;
         if (loserPool == 0) return betAmount; // would refund via empty-side rule
         uint256 totalPool = winnerPool + loserPool;
-        uint16 effectiveCreatorFee = _isCreatorFeeForfeited(newYes, newNo, m.creatorFeeBpsSnapshot)
-            ? uint16(0)
-            : m.creatorFeeBpsSnapshot;
+        uint16 effectiveCreatorFee =
+            _isCreatorFeeForfeited(newYes, newNo, m.creatorFeeBpsSnapshot) ? uint16(0) : m.creatorFeeBpsSnapshot;
         uint256 feeBps = uint256(m.protocolFeeBpsSnapshot) + uint256(effectiveCreatorFee);
         uint256 payoutPool = totalPool - (totalPool * feeBps / 10000);
         return (betAmount * payoutPool) / winnerPool;
@@ -598,11 +577,7 @@ contract MakoMarketsV4 {
     ///      agrees on which fee regime applies. Parameterized on the pool
     ///      values (not just a Market) so `previewPayout` can check the
     ///      post-bet pool state.
-    function _isCreatorFeeForfeited(uint256 yes, uint256 no, uint16 creatorFeeBpsSnap)
-        internal
-        pure
-        returns (bool)
-    {
+    function _isCreatorFeeForfeited(uint256 yes, uint256 no, uint16 creatorFeeBpsSnap) internal pure returns (bool) {
         uint256 minSide = yes < no ? yes : no;
         uint256 maxSide = yes < no ? no : yes;
         if (minSide == 0) return false; // empty-side is handled by REFUND, not forfeit

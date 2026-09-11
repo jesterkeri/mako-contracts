@@ -1173,13 +1173,7 @@ contract MakoMarketsV4Test is Test {
         uint64 bettingClose = created + 30 minutes;
         uint64 resolveAt = created + 1 hours;
 
-        uint256 id = mako.createMarket(
-            MakoMarketsV4.MarketType.CRYPTO,
-            bytes32("x"),
-            bettingClose,
-            resolveAt,
-            "q"
-        );
+        uint256 id = mako.createMarket(MakoMarketsV4.MarketType.CRYPTO, bytes32("x"), bettingClose, resolveAt, "q");
 
         MakoMarketsV4.Market memory m = mako.getMarket(id);
         assertEq(uint256(m.bettingCloseTime), uint256(bettingClose));
@@ -1213,25 +1207,13 @@ contract MakoMarketsV4Test is Test {
     function test_suggestedCryptoBettingCloseTime_tiers() public view {
         uint64 t0 = 1_700_000_000;
         // <= 1 hour → 50%
-        assertEq(
-            uint256(mako.suggestedCryptoBettingCloseTime(t0, t0 + 1 hours)),
-            uint256(t0) + 30 minutes
-        );
+        assertEq(uint256(mako.suggestedCryptoBettingCloseTime(t0, t0 + 1 hours)), uint256(t0) + 30 minutes);
         // <= 1 day → 60%
-        assertEq(
-            uint256(mako.suggestedCryptoBettingCloseTime(t0, t0 + 1 days)),
-            uint256(t0) + (1 days * 60) / 100
-        );
+        assertEq(uint256(mako.suggestedCryptoBettingCloseTime(t0, t0 + 1 days)), uint256(t0) + (1 days * 60) / 100);
         // <= 3 days → 70%
-        assertEq(
-            uint256(mako.suggestedCryptoBettingCloseTime(t0, t0 + 3 days)),
-            uint256(t0) + (3 days * 70) / 100
-        );
+        assertEq(uint256(mako.suggestedCryptoBettingCloseTime(t0, t0 + 3 days)), uint256(t0) + (3 days * 70) / 100);
         // > 3 days (up to 7 days) → 85%
-        assertEq(
-            uint256(mako.suggestedCryptoBettingCloseTime(t0, t0 + 7 days)),
-            uint256(t0) + (7 days * 85) / 100
-        );
+        assertEq(uint256(mako.suggestedCryptoBettingCloseTime(t0, t0 + 7 days)), uint256(t0) + (7 days * 85) / 100);
     }
 
     // ------------------------------------------------------------------
@@ -1245,13 +1227,7 @@ contract MakoMarketsV4Test is Test {
         uint64 kickoff = created + 1 hours;
         uint64 matchEnd = created + 3 hours;
 
-        uint256 id = mako.createMarket(
-            MakoMarketsV4.MarketType.FOOTBALL,
-            bytes32("x"),
-            kickoff,
-            matchEnd,
-            "q"
-        );
+        uint256 id = mako.createMarket(MakoMarketsV4.MarketType.FOOTBALL, bytes32("x"), kickoff, matchEnd, "q");
         MakoMarketsV4.Market memory m = mako.getMarket(id);
         assertEq(uint256(m.bettingCloseTime), uint256(kickoff));
         assertEq(uint256(m.closeTime), uint256(matchEnd));
@@ -1283,42 +1259,18 @@ contract MakoMarketsV4Test is Test {
 
         // bettingCloseTime in the past.
         vm.expectRevert(MakoMarketsV4.BadCloseTime.selector);
-        mako.createMarket(
-            MakoMarketsV4.MarketType.CRYPTO,
-            bytes32("x"),
-            t0 - 1,
-            t0 + 1 hours,
-            "q"
-        );
+        mako.createMarket(MakoMarketsV4.MarketType.CRYPTO, bytes32("x"), t0 - 1, t0 + 1 hours, "q");
 
         // bettingCloseTime > closeTime.
         vm.expectRevert(MakoMarketsV4.BadCloseTime.selector);
-        mako.createMarket(
-            MakoMarketsV4.MarketType.CRYPTO,
-            bytes32("x"),
-            t0 + 2 hours,
-            t0 + 1 hours,
-            "q"
-        );
+        mako.createMarket(MakoMarketsV4.MarketType.CRYPTO, bytes32("x"), t0 + 2 hours, t0 + 1 hours, "q");
 
         // 4 min < MIN_DURATION (5 min) → revert.
         vm.expectRevert(MakoMarketsV4.BadDuration.selector);
-        mako.createMarket(
-            MakoMarketsV4.MarketType.CRYPTO,
-            bytes32("x"),
-            t0 + 3 minutes,
-            t0 + 4 minutes,
-            "q"
-        );
+        mako.createMarket(MakoMarketsV4.MarketType.CRYPTO, bytes32("x"), t0 + 3 minutes, t0 + 4 minutes, "q");
 
         // 5 min + 1s → succeeds.
-        mako.createMarket(
-            MakoMarketsV4.MarketType.CRYPTO,
-            bytes32("x"),
-            t0 + 5 minutes,
-            t0 + 5 minutes + 1,
-            "q"
-        );
+        mako.createMarket(MakoMarketsV4.MarketType.CRYPTO, bytes32("x"), t0 + 5 minutes, t0 + 5 minutes + 1, "q");
     }
 
     // ------------------------------------------------------------------
