@@ -1274,13 +1274,7 @@ contract MakoMarketsV4Test is Test {
         uint64 resolveAt = created + 1 hours;
 
         uint256 id = mako.createMarket(
-            MakoMarketsV4.MarketType.CRYPTO,
-            bytes32("x"),
-            bettingClose,
-            resolveAt,
-            "q",
-            ONE_USDC,
-            true
+            MakoMarketsV4.MarketType.CRYPTO, bytes32("x"), bettingClose, resolveAt, "q", ONE_USDC, true
         );
 
         MakoMarketsV4.Market memory m = mako.getMarket(id);
@@ -1315,25 +1309,13 @@ contract MakoMarketsV4Test is Test {
     function test_suggestedCryptoBettingCloseTime_tiers() public view {
         uint64 t0 = 1_700_000_000;
         // <= 1 hour → 50%
-        assertEq(
-            uint256(mako.suggestedCryptoBettingCloseTime(t0, t0 + 1 hours)),
-            uint256(t0) + 30 minutes
-        );
+        assertEq(uint256(mako.suggestedCryptoBettingCloseTime(t0, t0 + 1 hours)), uint256(t0) + 30 minutes);
         // <= 1 day → 60%
-        assertEq(
-            uint256(mako.suggestedCryptoBettingCloseTime(t0, t0 + 1 days)),
-            uint256(t0) + (1 days * 60) / 100
-        );
+        assertEq(uint256(mako.suggestedCryptoBettingCloseTime(t0, t0 + 1 days)), uint256(t0) + (1 days * 60) / 100);
         // <= 3 days → 70%
-        assertEq(
-            uint256(mako.suggestedCryptoBettingCloseTime(t0, t0 + 3 days)),
-            uint256(t0) + (3 days * 70) / 100
-        );
+        assertEq(uint256(mako.suggestedCryptoBettingCloseTime(t0, t0 + 3 days)), uint256(t0) + (3 days * 70) / 100);
         // > 3 days (up to 7 days) → 85%
-        assertEq(
-            uint256(mako.suggestedCryptoBettingCloseTime(t0, t0 + 7 days)),
-            uint256(t0) + (7 days * 85) / 100
-        );
+        assertEq(uint256(mako.suggestedCryptoBettingCloseTime(t0, t0 + 7 days)), uint256(t0) + (7 days * 85) / 100);
     }
 
     // ------------------------------------------------------------------
@@ -1347,15 +1329,8 @@ contract MakoMarketsV4Test is Test {
         uint64 kickoff = created + 1 hours;
         uint64 matchEnd = created + 3 hours;
 
-        uint256 id = mako.createMarket(
-            MakoMarketsV4.MarketType.FOOTBALL,
-            bytes32("x"),
-            kickoff,
-            matchEnd,
-            "q",
-            ONE_USDC,
-            true
-        );
+        uint256 id =
+            mako.createMarket(MakoMarketsV4.MarketType.FOOTBALL, bytes32("x"), kickoff, matchEnd, "q", ONE_USDC, true);
         MakoMarketsV4.Market memory m = mako.getMarket(id);
         assertEq(uint256(m.bettingCloseTime), uint256(kickoff));
         assertEq(uint256(m.closeTime), uint256(matchEnd));
@@ -1387,49 +1362,23 @@ contract MakoMarketsV4Test is Test {
 
         // bettingCloseTime in the past.
         vm.expectRevert(MakoMarketsV4.BadCloseTime.selector);
-        mako.createMarket(
-            MakoMarketsV4.MarketType.CRYPTO,
-            bytes32("x"),
-            t0 - 1,
-            t0 + 1 hours,
-            "q",
-            ONE_USDC,
-            true
-        );
+        mako.createMarket(MakoMarketsV4.MarketType.CRYPTO, bytes32("x"), t0 - 1, t0 + 1 hours, "q", ONE_USDC, true);
 
         // bettingCloseTime > closeTime.
         vm.expectRevert(MakoMarketsV4.BadCloseTime.selector);
         mako.createMarket(
-            MakoMarketsV4.MarketType.CRYPTO,
-            bytes32("x"),
-            t0 + 2 hours,
-            t0 + 1 hours,
-            "q",
-            ONE_USDC,
-            true
+            MakoMarketsV4.MarketType.CRYPTO, bytes32("x"), t0 + 2 hours, t0 + 1 hours, "q", ONE_USDC, true
         );
 
         // 4 min < MIN_DURATION (5 min) → revert.
         vm.expectRevert(MakoMarketsV4.BadDuration.selector);
         mako.createMarket(
-            MakoMarketsV4.MarketType.CRYPTO,
-            bytes32("x"),
-            t0 + 3 minutes,
-            t0 + 4 minutes,
-            "q",
-            ONE_USDC,
-            true
+            MakoMarketsV4.MarketType.CRYPTO, bytes32("x"), t0 + 3 minutes, t0 + 4 minutes, "q", ONE_USDC, true
         );
 
         // 5 min + 1s → succeeds.
         mako.createMarket(
-            MakoMarketsV4.MarketType.CRYPTO,
-            bytes32("x"),
-            t0 + 5 minutes,
-            t0 + 5 minutes + 1,
-            "q",
-            ONE_USDC,
-            true
+            MakoMarketsV4.MarketType.CRYPTO, bytes32("x"), t0 + 5 minutes, t0 + 5 minutes + 1, "q", ONE_USDC, true
         );
     }
 
@@ -2019,13 +1968,13 @@ contract MakoMarketsV4Test is Test {
     //        reordering breaks them. This test makes reordering loud.
     // ------------------------------------------------------------------
     function test_enumOrdering_isStable_v2() public pure {
-        assertEq(uint8(MakoMarketsV4.MarketType.FOOTBALL),    0);
-        assertEq(uint8(MakoMarketsV4.MarketType.CRYPTO),      1);
-        assertEq(uint8(MakoMarketsV4.MarketType.BASKETBALL),  2);
-        assertEq(uint8(MakoMarketsV4.MarketType.FOREX),       3);
+        assertEq(uint8(MakoMarketsV4.MarketType.FOOTBALL), 0);
+        assertEq(uint8(MakoMarketsV4.MarketType.CRYPTO), 1);
+        assertEq(uint8(MakoMarketsV4.MarketType.BASKETBALL), 2);
+        assertEq(uint8(MakoMarketsV4.MarketType.FOREX), 3);
         assertEq(uint8(MakoMarketsV4.MarketType.COMMODITIES), 4);
-        assertEq(uint8(MakoMarketsV4.MarketType.STOCKS),      5);
-        assertEq(uint8(MakoMarketsV4.MarketType.MAKO),        6);
+        assertEq(uint8(MakoMarketsV4.MarketType.STOCKS), 5);
+        assertEq(uint8(MakoMarketsV4.MarketType.MAKO), 6);
     }
 
     // ------------------------------------------------------------------
@@ -2134,8 +2083,8 @@ contract MakoMarketsV4Test is Test {
         MakoMarketsV4.Market memory bm = mako.getMarket(bobId);
         assertEq(bm.creator, bob);
 
-        (uint256 aliceCount, ) = mako.creatorCreatesToday(alice);
-        (uint256 bobCount, ) = mako.creatorCreatesToday(bob);
+        (uint256 aliceCount,) = mako.creatorCreatesToday(alice);
+        (uint256 bobCount,) = mako.creatorCreatesToday(bob);
         assertEq(aliceCount, 10);
         assertEq(bobCount, 1);
     }
@@ -2160,7 +2109,7 @@ contract MakoMarketsV4Test is Test {
         uint256 id = _createCryptoAs(alice, 999);
         MakoMarketsV4.Market memory m = mako.getMarket(id);
         assertEq(m.creator, alice);
-        (uint256 countAfter, ) = mako.creatorCreatesToday(alice);
+        (uint256 countAfter,) = mako.creatorCreatesToday(alice);
         assertEq(countAfter, 1);
     }
 
@@ -2218,7 +2167,7 @@ contract MakoMarketsV4Test is Test {
 
         // The non-MAKO counter for the admin is unchanged by the MAKO
         // creates (MAKO never increments).
-        (uint256 countAfterMako, ) = mako.creatorCreatesToday(address(this));
+        (uint256 countAfterMako,) = mako.creatorCreatesToday(address(this));
         assertEq(countAfterMako, 10);
     }
 
@@ -2230,7 +2179,7 @@ contract MakoMarketsV4Test is Test {
         for (uint256 i = 0; i < 9; i++) {
             _createCryptoAs(alice, i);
         }
-        (uint256 countBefore, ) = mako.creatorCreatesToday(alice);
+        (uint256 countBefore,) = mako.creatorCreatesToday(alice);
         assertEq(countBefore, 9);
 
         usdc.mint(alice, 2 * ONE_USDC);
@@ -2247,13 +2196,13 @@ contract MakoMarketsV4Test is Test {
         );
 
         // Counter still 9; alice can still do one more successful create.
-        (uint256 countAfterRevert, ) = mako.creatorCreatesToday(alice);
+        (uint256 countAfterRevert,) = mako.creatorCreatesToday(alice);
         assertEq(countAfterRevert, 9);
 
         uint256 id = _createCryptoAs(alice, 10);
         MakoMarketsV4.Market memory m = mako.getMarket(id);
         assertEq(m.creator, alice);
-        (uint256 countAt10, ) = mako.creatorCreatesToday(alice);
+        (uint256 countAt10,) = mako.creatorCreatesToday(alice);
         assertEq(countAt10, 10);
     }
 
@@ -2289,7 +2238,7 @@ contract MakoMarketsV4Test is Test {
         for (uint256 i = 0; i < 10; i++) {
             _createCryptoAs(alice, i);
         }
-        (uint256 endCount, ) = mako.creatorCreatesToday(alice);
+        (uint256 endCount,) = mako.creatorCreatesToday(alice);
         assertEq(endCount, 10);
 
         // 11th at the same second still reverts. dayEnd is the last
@@ -2310,15 +2259,14 @@ contract MakoMarketsV4Test is Test {
         // Step forward exactly one second — block.timestamp == N*86400,
         // integer division puts us in the new day. Counter resets.
         vm.warp(dayEnd + 1);
-        (uint256 newDayCount, uint256 newDayRemaining) =
-            mako.creatorCreatesToday(alice);
+        (uint256 newDayCount, uint256 newDayRemaining) = mako.creatorCreatesToday(alice);
         assertEq(newDayCount, 0);
         assertEq(newDayRemaining, 10);
 
         uint256 id = _createCryptoAs(alice, 999);
         MakoMarketsV4.Market memory m = mako.getMarket(id);
         assertEq(m.creator, alice);
-        (uint256 afterFresh, ) = mako.creatorCreatesToday(alice);
+        (uint256 afterFresh,) = mako.creatorCreatesToday(alice);
         assertEq(afterFresh, 1);
     }
 
@@ -2336,7 +2284,7 @@ contract MakoMarketsV4Test is Test {
         vm.prank(alice);
         fot.approve(address(fotMako), type(uint256).max);
 
-        (uint256 before, ) = fotMako.creatorCreatesToday(alice);
+        (uint256 before,) = fotMako.creatorCreatesToday(alice);
         assertEq(before, 0);
 
         vm.prank(alice);
@@ -2351,8 +2299,7 @@ contract MakoMarketsV4Test is Test {
             true
         );
 
-        (uint256 afterRevert, uint256 remainingAfter) =
-            fotMako.creatorCreatesToday(alice);
+        (uint256 afterRevert, uint256 remainingAfter) = fotMako.creatorCreatesToday(alice);
         assertEq(afterRevert, 0);
         assertEq(remainingAfter, 10);
     }

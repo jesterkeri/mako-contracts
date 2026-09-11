@@ -117,7 +117,10 @@ contract DeployV4 is Script {
         if (!skipRotation) {
             adminSafe = vm.envAddress("MAKO_ADMIN_SAFE_ADDRESS");
             require(adminSafe != address(0), "MAKO_ADMIN_SAFE_ADDRESS is zero");
-            require(adminSafe != deployer, "MAKO_ADMIN_SAFE_ADDRESS equals deployer; rotation would be a no-op and admin/deployer must be distinct keys");
+            require(
+                adminSafe != deployer,
+                "MAKO_ADMIN_SAFE_ADDRESS equals deployer; rotation would be a no-op and admin/deployer must be distinct keys"
+            );
         }
 
         // Optional recovery mode: attach to an existing contract instead of
@@ -128,9 +131,7 @@ contract DeployV4 is Script {
         // ending in "deploy complete." Recovery flows must use rotation mode.
         address existing = vm.envOr("EXISTING_MAKO_ADDRESS", address(0));
         if (skipRotation && existing != address(0)) {
-            revert(
-                "EXISTING_MAKO_ADDRESS is not supported in skip-rotation mode; unset it or use rotation mode"
-            );
+            revert("EXISTING_MAKO_ADDRESS is not supported in skip-rotation mode; unset it or use rotation mode");
         }
 
         if (skipRotation) {

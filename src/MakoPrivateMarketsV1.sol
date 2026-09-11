@@ -53,8 +53,8 @@ contract MakoPrivateMarketsV1 {
 
     enum MarketState {
         Created,
-        Open,                // Lazy only — never written to storage
-        AwaitingCreator,     // Lazy only — never written to storage
+        Open, // Lazy only — never written to storage
+        AwaitingCreator, // Lazy only — never written to storage
         Resolved,
         EmptyPoolResolved,
         Canceled,
@@ -81,17 +81,17 @@ contract MakoPrivateMarketsV1 {
     // Constants
     // ---------------------------------------------------------------------
 
-    uint256 public constant MIN_STAKE = 10_000;          // 0.01 USDC
+    uint256 public constant MIN_STAKE = 10_000; // 0.01 USDC
     uint256 public constant POST_CLOSE_GRACE = 7 days;
-    uint16  public constant PROTOCOL_FEE_BPS = 100;      // 1%
-    uint16  public constant BPS_DENOMINATOR = 10_000;
-    uint8   public constant MAX_OPTIONS = 50;
-    uint8   public constant MAX_WINNERS = 10;
-    uint8   public constant MAX_ALLOWLIST = 100;
-    uint16  public constant MAX_TITLE_BYTES = 100;
-    uint16  public constant MAX_DESCRIPTION_BYTES = 2_000;
-    uint16  public constant MAX_OPTION_LABEL_BYTES = 80;
-    uint16  public constant MAX_STREAM_URL_BYTES = 256;
+    uint16 public constant PROTOCOL_FEE_BPS = 100; // 1%
+    uint16 public constant BPS_DENOMINATOR = 10_000;
+    uint8 public constant MAX_OPTIONS = 50;
+    uint8 public constant MAX_WINNERS = 10;
+    uint8 public constant MAX_ALLOWLIST = 100;
+    uint16 public constant MAX_TITLE_BYTES = 100;
+    uint16 public constant MAX_DESCRIPTION_BYTES = 2_000;
+    uint16 public constant MAX_OPTION_LABEL_BYTES = 80;
+    uint16 public constant MAX_STREAM_URL_BYTES = 256;
 
     // Friendly binary option indices
     uint8 internal constant FRIENDLY_NO = 0;
@@ -161,11 +161,11 @@ contract MakoPrivateMarketsV1 {
         // Stored state (event-driven only — never holds Open / AwaitingCreator)
         MarketState state;
         // Stake bounds (per-stake)
-        uint256 perStakeMin;     // 0 = defaults to MIN_STAKE floor
-        uint256 perStakeMax;     // 0 = no cap
+        uint256 perStakeMin; // 0 = defaults to MIN_STAKE floor
+        uint256 perStakeMax; // 0 = no cap
         uint256 perWalletCumulativeMax; // 0 = no cap (Prize Pool only)
         // Open Vote-only
-        uint256 fixedStake;      // 0 if not Open Vote
+        uint256 fixedStake; // 0 if not Open Vote
         // Vote-shape winners count (Open Vote / Prize Pool)
         uint8 winnersCount;
         // Aggregates
@@ -181,8 +181,8 @@ contract MakoPrivateMarketsV1 {
     }
 
     struct VoteResolution {
-        uint256[] topN;          // option indices (length <= winnersCount; may be shorter if few-staked)
-        uint256[] topNStakes;    // pool received by each top-N option (Prize Pool); empty for Open Vote
+        uint256[] topN; // option indices (length <= winnersCount; may be shorter if few-staked)
+        uint256[] topNStakes; // pool received by each top-N option (Prize Pool); empty for Open Vote
         uint256 sumOfTopNStakes; // Prize Pool only
     }
 
@@ -194,15 +194,15 @@ contract MakoPrivateMarketsV1 {
         bytes description;
         bytes streamUrl;
         bytes[] optionLabels;
-        address[] participantWallets;   // Prize Pool only; empty otherwise
-        address[] allowlist;            // empty if open participation
+        address[] participantWallets; // Prize Pool only; empty otherwise
+        address[] allowlist; // empty if open participation
         VisibilityView viewMode;
         VisibilityParticipation participationMode;
         uint256 perStakeMin;
         uint256 perStakeMax;
         uint256 perWalletCumulativeMax;
-        uint256 fixedStake;             // Open Vote only
-        uint8 winnersCount;             // Vote shapes only
+        uint256 fixedStake; // Open Vote only
+        uint8 winnersCount; // Vote shapes only
         bytes32 clientNonce;
     }
 
@@ -284,11 +284,7 @@ contract MakoPrivateMarketsV1 {
     event MarketMetadataFrozen(uint256 indexed marketId, uint256 frozenAt);
 
     event Staked(
-        uint256 indexed marketId,
-        address indexed staker,
-        uint256 optionIndex,
-        uint256 amount,
-        uint256 timestamp
+        uint256 indexed marketId, address indexed staker, uint256 optionIndex, uint256 amount, uint256 timestamp
     );
 
     /// @notice Emitted on Friendly Resolve.
@@ -304,21 +300,13 @@ contract MakoPrivateMarketsV1 {
     ///         non-treasury `Claimed` events for the market rather than reading
     ///         this field.
     event ResolvedFriendly(
-        uint256 indexed marketId,
-        uint8 outcome,
-        bool emptyPoolPath,
-        uint256 feeTaken,
-        uint256 totalOwed
+        uint256 indexed marketId, uint8 outcome, bool emptyPoolPath, uint256 feeTaken, uint256 totalOwed
     );
 
     event ResolvedOpenVote(uint256 indexed marketId, uint256[] topN, uint256 feeTaken);
 
     event DistributedPrizePool(
-        uint256 indexed marketId,
-        uint256[] topN,
-        address[] winnerWallets,
-        uint256[] amountsOwed,
-        uint256 feeTaken
+        uint256 indexed marketId, uint256[] topN, address[] winnerWallets, uint256[] amountsOwed, uint256 feeTaken
     );
 
     event Canceled(uint256 indexed marketId, uint8 reason);
@@ -601,7 +589,15 @@ contract MakoPrivateMarketsV1 {
         emit Staked(marketId, msg.sender, optionIndex, amount, block.timestamp);
     }
 
-    function _stakeCommon(uint256 marketId, Market storage m, uint256 /*optionIndex*/, uint256 amount) internal {
+    function _stakeCommon(
+        uint256 marketId,
+        Market storage m,
+        uint256,
+        /*optionIndex*/
+        uint256 amount
+    )
+        internal
+    {
         // Treasury cannot stake/bet
         if (msg.sender == treasury) revert TreasuryNotAllowed();
         // State / time gates
@@ -709,7 +705,9 @@ contract MakoPrivateMarketsV1 {
 
         uint256[] memory topN = _computeTopN(marketId);
         VoteResolution storage r = _voteResolution[marketId];
-        for (uint256 i = 0; i < topN.length; i++) r.topN.push(topN[i]);
+        for (uint256 i = 0; i < topN.length; i++) {
+            r.topN.push(topN[i]);
+        }
         // Open Vote topNStakes/sumOfTopNStakes unused
         emit ResolvedOpenVote(marketId, topN, fee);
     }
@@ -726,7 +724,9 @@ contract MakoPrivateMarketsV1 {
 
         uint256[] memory topN = _computeTopN(marketId);
         uint256 sum;
-        for (uint256 i = 0; i < topN.length; i++) sum += _poolPerOption[marketId][topN[i]];
+        for (uint256 i = 0; i < topN.length; i++) {
+            sum += _poolPerOption[marketId][topN[i]];
+        }
 
         VoteResolution storage r = _voteResolution[marketId];
         address[] memory winners = new address[](topN.length);
@@ -849,11 +849,8 @@ contract MakoPrivateMarketsV1 {
         if (m.creator == address(0)) revert MarketUnknown();
         MarketState eff = _effectiveState(m, marketId);
         if (
-            eff != MarketState.Resolved &&
-            eff != MarketState.EmptyPoolResolved &&
-            eff != MarketState.Canceled &&
-            eff != MarketState.TimedOut &&
-            eff != MarketState.ZeroStakeExpired
+            eff != MarketState.Resolved && eff != MarketState.EmptyPoolResolved && eff != MarketState.Canceled
+                && eff != MarketState.TimedOut && eff != MarketState.ZeroStakeExpired
         ) revert NotInTerminalState();
 
         uint256 amount;
@@ -884,12 +881,10 @@ contract MakoPrivateMarketsV1 {
     ///      `_friendlyDustNumerator` / `m.dust` for Friendly winner claims so
     ///      dust accrues toward the treasury's progressive sweep. Called only
     ///      from the user-claim path of `claim()`.
-    function _settleUserClaim(
-        uint256 marketId,
-        Market storage m,
-        address w,
-        MarketState eff
-    ) internal returns (uint256) {
+    function _settleUserClaim(uint256 marketId, Market storage m, address w, MarketState eff)
+        internal
+        returns (uint256)
+    {
         if (m.shape == MarketShape.Friendly && eff == MarketState.Resolved) {
             uint256 winnerPool;
             uint256 loserPool;
@@ -917,12 +912,11 @@ contract MakoPrivateMarketsV1 {
         return _computeUserClaim(marketId, m, w, eff);
     }
 
-    function _computeUserClaim(
-        uint256 marketId,
-        Market storage m,
-        address w,
-        MarketState eff
-    ) internal view returns (uint256) {
+    function _computeUserClaim(uint256 marketId, Market storage m, address w, MarketState eff)
+        internal
+        view
+        returns (uint256)
+    {
         if (m.shape == MarketShape.Friendly) {
             uint256 betYes = _bets[marketId][w][FRIENDLY_YES];
             uint256 betNo = _bets[marketId][w][FRIENDLY_NO];
@@ -974,7 +968,10 @@ contract MakoPrivateMarketsV1 {
             // Is myOption in topN?
             bool found;
             for (uint256 i = 0; i < r.topN.length; i++) {
-                if (r.topN[i] == myOption) { found = true; break; }
+                if (r.topN[i] == myOption) {
+                    found = true;
+                    break;
+                }
             }
             if (!found) return 0;
             if (r.sumOfTopNStakes == 0) return 0;
@@ -994,7 +991,14 @@ contract MakoPrivateMarketsV1 {
     // Lazy effective-state derivation
     // ---------------------------------------------------------------------
 
-    function _effectiveState(Market storage m, uint256 /*marketId*/) internal view returns (MarketState) {
+    function _effectiveState(
+        Market storage m,
+        uint256 /*marketId*/
+    )
+        internal
+        view
+        returns (MarketState)
+    {
         if (m.state != MarketState.Created) return m.state;
         if (block.timestamp < m.stakingOpensAt) return MarketState.Created;
         if (block.timestamp < m.closeAt) return MarketState.Open;
@@ -1091,7 +1095,9 @@ contract MakoPrivateMarketsV1 {
     ///         so that off-chain tie-break previews stay byte-equivalent to the
     ///         contract's resolution-time selection sort.
     function getOptionFirstStakeSequence(uint256 marketId, uint256 optionIndex)
-        external view returns (uint16 sequence, bool isSet)
+        external
+        view
+        returns (uint16 sequence, bool isSet)
     {
         sequence = _firstStakeSequence[marketId][optionIndex];
         isSet = _firstStakeSequenceSet[marketId][optionIndex];
@@ -1111,7 +1117,11 @@ contract MakoPrivateMarketsV1 {
         return _staked[marketId][wallet][optionIndex];
     }
 
-    function getVoteResolution(uint256 marketId) external view returns (uint256[] memory topN, uint256[] memory topNStakes, uint256 sumOfTopNStakes) {
+    function getVoteResolution(uint256 marketId)
+        external
+        view
+        returns (uint256[] memory topN, uint256[] memory topNStakes, uint256 sumOfTopNStakes)
+    {
         VoteResolution storage r = _voteResolution[marketId];
         topN = r.topN;
         topNStakes = r.topNStakes;
@@ -1126,11 +1136,8 @@ contract MakoPrivateMarketsV1 {
         if (m.creator == address(0)) return 0;
         MarketState eff = _effectiveState(m, marketId);
         if (
-            eff != MarketState.Resolved &&
-            eff != MarketState.EmptyPoolResolved &&
-            eff != MarketState.Canceled &&
-            eff != MarketState.TimedOut &&
-            eff != MarketState.ZeroStakeExpired
+            eff != MarketState.Resolved && eff != MarketState.EmptyPoolResolved && eff != MarketState.Canceled
+                && eff != MarketState.TimedOut && eff != MarketState.ZeroStakeExpired
         ) return 0;
 
         if (wallet == treasury) {
