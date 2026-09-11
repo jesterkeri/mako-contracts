@@ -10,7 +10,7 @@ pragma solidity ^0.8.24;
 ///      - claim, claimCreatorFee, withdrawTreasury use safeTransfer (not native call).
 ///      - Constructor takes the USDC token address (varies per chain).
 ///      - No `payable` anywhere; no `receive()`. Any native value sent is lost.
-///      - MIN_BET in USDC base units (6 decimals); 1_000_000 = 1 USDC.
+///      - MIN_BET in USDC base units (6 decimals); 100_000 = 0.10 USDC.
 ///
 ///      Inline IERC20 + SafeERC20 used to keep this contract self-contained.
 ///      Auditor may recommend swapping to OpenZeppelin's SafeERC20 — both are
@@ -46,10 +46,25 @@ library SafeERC20Min {
 contract MakoMarketsV4 {
     using SafeERC20Min for IERC20;
 
+    /// @notice Market category. APPEND-ONLY: new entries go at the end so
+    ///         existing on-chain mType values (FOOTBALL=0, CRYPTO=1,
+    ///         BASKETBALL=2) keep their numeric identity. Indexers + AA
+    ///         allowlists pin specific values; reordering breaks them.
+    ///
+    ///         FOREX / COMMODITIES / STOCKS are price-feed types resolved
+    ///         the same way as CRYPTO (off-chain oracle interprets
+    ///         oracleRef). MAKO is the house-curated type — admin-only
+    ///         at creation, no creator-seed, no creator fee. Used for
+    ///         Polymarket-style "anything goes" markets that Mako resolves
+    ///         manually via the existing onlyResolver path.
     enum MarketType {
-        FOOTBALL,
-        CRYPTO,
-        BASKETBALL
+        FOOTBALL,      // 0
+        CRYPTO,        // 1
+        BASKETBALL,    // 2
+        FOREX,         // 3
+        COMMODITIES,   // 4
+        STOCKS,        // 5
+        MAKO           // 6
     }
     enum Outcome {
         UNRESOLVED,
@@ -110,8 +125,14 @@ contract MakoMarketsV4 {
     uint16 public protocolFeeBps = 100; // 1%
     uint16 public creatorFeeBps = 200; // 2%
     uint16 public constant MAX_TOTAL_FEE_BPS = 500;
-    /// @notice Minimum bet amount in USDC base units (6 decimals). 1_000_000 = 1.00 USDC.
-    uint256 public constant MIN_BET = 1_000_000;
+    /// @notice Minimum bet amount in USDC base units (6 decimals). 100_000 = 0.10 USDC.
+    uint256 public constant MIN_BET = 100_000;
+    /// @notice Minimum USDC the creator must seed at market creation. Goes
+    ///         into the market pool as the creator's first bet on the side
+    ///         they choose — claimable like any other bet at resolution.
+    ///         NOT a fee: Mako does not extract this to treasury. Skipped
+    ///         entirely for MAKO-type (house) markets. 1_000_000 = 1.00 USDC.
+    uint256 public constant MIN_CREATOR_SEED = 1_000_000;
     uint256 public constant MAX_DURATION = 7 days;
     uint256 public constant MIN_DURATION = 5 minutes;
     uint256 public constant RESOLUTION_GRACE = 24 hours;
@@ -121,6 +142,27 @@ contract MakoMarketsV4 {
     ///         manipulation patterns. Constant rather than admin-tunable to
     ///         keep the per-bet gas predictable.
     uint64 public constant MIN_SECONDS_BETWEEN_BETS = 30;
+
+    /// @notice Maximum non-MAKO `createMarket` calls a single wallet may
+    ///         make within one UTC day (block.timestamp / 86400). MAKO
+    ///         markets are admin-curated and intentionally exempt — the
+    ///         house can spin up as many house markets as it needs.
+    ///         Constant rather than admin-tunable to keep behavior
+    ///         predictable across betas and to avoid an admin-key
+    ///         compromise being able to silently disable the cap.
+    uint256 public constant MAX_CREATES_PER_DAY = 10;
+    /// @notice Seconds per UTC day. Used to bucket creator-creates by day
+    ///         index. A UTC-day boundary (00:00 UTC) is the natural reset
+    ///         — using a rolling 24h window would require per-call array
+    ///         scans which we explicitly want to avoid.
+    uint256 public constant SECONDS_PER_DAY = 86400;
+    /// @notice Number of non-MAKO `createMarket` calls a wallet has made
+    ///         on a given UTC day index. Keyed by `block.timestamp /
+    ///         SECONDS_PER_DAY`. Read by `creatorCreatesToday(creator)`
+    ///         for the UI; incremented inside `createMarket` only after
+    ///         every other validation passes (so a revert can't burn a
+    ///         slot).
+    mapping(address => mapping(uint256 => uint256)) public creatorCreatesPerDay;
 
     // -----------------------------------------------------------------------
     // Per-wallet / anti-abuse caps (admin-tunable; see `setStage*` helpers)
@@ -132,13 +174,18 @@ contract MakoMarketsV4 {
     ///         bets aren't blocked by the check.
     uint16 public maxWalletShareBps = 2000;
     /// @notice Pool size (USDC base units) below which the share cap is not
-    ///         enforced. Default 200 USDC. Rationale: in the first few
-    ///         bets, a single wallet IS most of the pool by definition.
-    uint256 public shareCapMinPool = 200 * MIN_BET;
+    ///         enforced. Default 200 USDC (200_000_000 base units). Rationale:
+    ///         in the first few bets, a single wallet IS most of the pool
+    ///         by definition. Pinned to absolute USDC, NOT a multiple of
+    ///         MIN_BET, so lowering MIN_BET doesn't shrink the activation
+    ///         threshold for the share cap.
+    uint256 public shareCapMinPool = 200_000_000;
     /// @notice Maximum total USDC a wallet can bet across BOTH sides of a
-    ///         single market. Default 10,000 USDC (permissive); admin
-    ///         tightens for beta/production stages via setMaxBetPerWallet.
-    uint256 public maxBetPerWalletPerMarket = 10_000 * MIN_BET;
+    ///         single market. Default 10,000 USDC (10_000_000_000 base
+    ///         units); admin tightens for beta/production stages via
+    ///         setMaxBetPerWallet. Pinned to absolute USDC, NOT a multiple
+    ///         of MIN_BET, so lowering MIN_BET doesn't shrink the ceiling.
+    uint256 public maxBetPerWalletPerMarket = 10_000_000_000;
     /// @notice Wallets flagged by the admin as abusive. Their `placeBet`
     ///         calls revert on every market. Flag/unflag via setBlocked.
     ///         Existing bets are unaffected — only new placements are
@@ -211,6 +258,18 @@ contract MakoMarketsV4 {
     error BetTooSoon();
     error WalletCapExceeded();
     error WalletShareCapExceeded();
+    /// @dev creator passed `creatorSeed < MIN_CREATOR_SEED` for a non-MAKO market.
+    error CreatorSeedTooSmall();
+    /// @dev creator passed `creatorSeed != 0` for a MAKO-type market (admin
+    ///      house markets must not seed; bettors join via placeBet later).
+    error CreatorSeedNotAllowed();
+    /// @dev non-owner attempted to create a MAKO-type market. MAKO is
+    ///      admin-curated — only `owner` may create one.
+    error NotOwnerForMakoMarket();
+    /// @dev wallet hit the per-UTC-day creation cap (MAX_CREATES_PER_DAY).
+    ///      Resets at the next UTC midnight. MAKO creates are exempt; this
+    ///      error only fires for non-MAKO types.
+    error CreatorDailyCapExceeded();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -248,33 +307,45 @@ contract MakoMarketsV4 {
     // Lifecycle
     // -----------------------------------------------------------------------
 
-    /// @notice Create a market.
-    /// @param  mType             Market category (FOOTBALL / BASKETBALL / CRYPTO).
+    /// @notice Create a market with a mandatory creator seed bet (except MAKO type).
+    /// @param  mType             Market category. Non-MAKO requires `creatorSeed >= MIN_CREATOR_SEED`
+    ///                           and the seed lands as the creator's first bet on the
+    ///                           chosen side. MAKO is admin-only and requires
+    ///                           `creatorSeed == 0` (house markets aren't pre-seeded).
     /// @param  oracleRef         Off-chain identifier the resolver interprets.
     /// @param  bettingCloseTime_ Moment after which `placeBet` reverts. Must
-    ///                           be in the future AND <= closeTime. For sports,
-    ///                           creators are expected to set this to
-    ///                           kickoff/tipoff; for crypto, creators are
-    ///                           expected to set it significantly before
-    ///                           closeTime (UI callers can default via the
-    ///                           `suggestedBettingCloseTime` view below).
+    ///                           be in the future AND <= closeTime.
     /// @param  closeTime         Moment after which `resolveMarket` becomes
     ///                           legal. Represents the event end (sports) or
-    ///                           the price evaluation point (crypto).
+    ///                           the price evaluation point (crypto / forex /
+    ///                           commodities / stocks).
     /// @param  question          Human-readable question (1–200 chars).
+    /// @param  creatorSeed       USDC base units the creator commits as their
+    ///                           first bet. For non-MAKO must be >= MIN_CREATOR_SEED;
+    ///                           for MAKO must be 0. This is a BET, not a fee —
+    ///                           the seed joins the pool and the creator can
+    ///                           claim it back at resolution like any other bet.
+    /// @param  creatorYes        Side the creator's seed bet lands on. Ignored
+    ///                           when mType == MAKO (no seed transferred).
     ///
     /// @dev The two-timestamp design is deliberate. A single closeTime
     ///      conflates "betting stops" with "resolution starts," which for
     ///      sports means either betting stays open through the match (stale-
     ///      market exploitation) or the resolver can resolve before the event
     ///      finishes (premature resolution). Neither is acceptable.
+    ///
+    ///      `nonReentrant` because non-MAKO paths now do an external
+    ///      `safeTransferFrom` of the creator's seed. Canonical USDC has no
+    ///      callbacks, but a misconfigured `_usdc` could reenter.
     function createMarket(
         MarketType mType,
         bytes32 oracleRef,
         uint64 bettingCloseTime_,
         uint64 closeTime,
-        string calldata question
-    ) external returns (uint256 id) {
+        string calldata question,
+        uint256 creatorSeed,
+        bool creatorYes
+    ) external nonReentrant returns (uint256 id) {
         if (closeTime <= block.timestamp) revert BadCloseTime();
         if (bettingCloseTime_ <= block.timestamp) revert BadCloseTime();
         if (bettingCloseTime_ > closeTime) revert BadCloseTime();
@@ -283,6 +354,30 @@ contract MakoMarketsV4 {
         if (duration > MAX_DURATION) revert BadCloseTime();
         uint256 qLen = bytes(question).length;
         if (qLen == 0 || qLen > 200) revert BadQuestion();
+
+        // Type-specific gate: MAKO is admin-only with no seed; everything
+        // else requires the creator to commit a seed bet and to not be
+        // on the blocklist (the seed is a bet, and blocked wallets can't
+        // bet anywhere else either — preventing the seed-as-bet bypass).
+        if (mType == MarketType.MAKO) {
+            if (msg.sender != owner) revert NotOwnerForMakoMarket();
+            if (creatorSeed != 0) revert CreatorSeedNotAllowed();
+        } else {
+            if (blocked[msg.sender]) revert WalletIsBlocked();
+            if (creatorSeed < MIN_CREATOR_SEED) revert CreatorSeedTooSmall();
+            // Daily creation cap (non-MAKO only). MAKO is intentionally
+            // exempt — admin-curated house markets run at whatever cadence
+            // operations needs. Increment happens after all pre-transfer
+            // validation; later reverts (e.g. TransferAmountMismatch) roll
+            // back the increment via EVM semantics, so a failed create
+            // doesn't burn a slot. `nonReentrant` is the primary guard
+            // against reentrant bypass.
+            uint256 today = block.timestamp / SECONDS_PER_DAY;
+            if (creatorCreatesPerDay[msg.sender][today] >= MAX_CREATES_PER_DAY) {
+                revert CreatorDailyCapExceeded();
+            }
+            creatorCreatesPerDay[msg.sender][today] += 1;
+        }
 
         id = nextMarketId++;
         Market storage m = markets[id];
@@ -294,11 +389,49 @@ contract MakoMarketsV4 {
         m.closeTime = closeTime;
         m.bettingCloseTime = bettingCloseTime_;
         // Snapshot the economics. Any `setFees` after this point will NOT
-        // retroactively change what this market pays out.
+        // retroactively change what this market pays out. MAKO markets
+        // forfeit the creator fee (Mako is the house, not a creator
+        // earning take) — the 0 snapshot flows through the existing
+        // resolve-time math without a special branch and produces a 99%
+        // payout pool instead of 97%.
         m.protocolFeeBpsSnapshot = protocolFeeBps;
-        m.creatorFeeBpsSnapshot = creatorFeeBps;
+        m.creatorFeeBpsSnapshot = (mType == MarketType.MAKO) ? 0 : creatorFeeBps;
 
         emit MarketCreated(id, msg.sender, mType, oracleRef, closeTime, question);
+
+        // Seed bookkeeping. MAKO markets skip this entirely — no USDC
+        // changes hands at creation and the pool starts empty. For all
+        // other types the seed is the creator's first bet (claimable at
+        // resolution like any other bet), not a fee.
+        if (mType != MarketType.MAKO) {
+            // Balance-delta guard identical to placeBet — catches a
+            // misconfigured fee-on-transfer token. Canonical USDC always
+            // passes this; the check is defense against deploy-time
+            // wiring mistakes.
+            uint256 balanceBefore = usdc.balanceOf(address(this));
+            usdc.safeTransferFrom(msg.sender, address(this), creatorSeed);
+            uint256 received = usdc.balanceOf(address(this)) - balanceBefore;
+            if (received != creatorSeed) revert TransferAmountMismatch();
+
+            // Set lastBetTime so the creator is locked out of an
+            // immediate follow-up placeBet within MIN_SECONDS_BETWEEN_BETS
+            // (matches the rate-limit guard placeBet applies to all
+            // bettors). Anti-abuse gates (max-wallet, share-cap) are NOT
+            // checked here: max-wallet is satisfied trivially (1 USDC <<
+            // 10,000 USDC ceiling) and share-cap is skipped in seed
+            // stage by placeBet's existing logic since pool < shareCapMinPool.
+            lastBetTime[id][msg.sender] = uint64(block.timestamp);
+            if (creatorYes) {
+                yesBets[id][msg.sender] = creatorSeed;
+                m.yesBettorCount = 1;
+                m.totalYes = creatorSeed;
+            } else {
+                noBets[id][msg.sender] = creatorSeed;
+                m.noBettorCount = 1;
+                m.totalNo = creatorSeed;
+            }
+            emit BetPlaced(id, msg.sender, creatorYes, creatorSeed);
+        }
     }
 
     /// @notice UI helper for CRYPTO markets only — returns a sensible default
@@ -550,6 +683,28 @@ contract MakoMarketsV4 {
 
     function getUserBet(uint256 id, address user) external view returns (uint256 yes, uint256 no, bool hasClaimed) {
         return (yesBets[id][user], noBets[id][user], claimed[id][user]);
+    }
+
+    /// @notice How many non-MAKO markets `creator` has created on the
+    ///         current UTC day, and how many they have left before
+    ///         hitting MAX_CREATES_PER_DAY. UI calls this on every
+    ///         /create page mount to disable the submit button when
+    ///         `remaining == 0` and to render a "N / 10 today" counter.
+    /// @dev    Computed against `block.timestamp / SECONDS_PER_DAY`; the
+    ///         answer changes at the next UTC midnight. MAKO-type creates
+    ///         never increment this counter (they're admin-curated and
+    ///         exempt from the cap), so admin can keep creating MAKO
+    ///         markets even when this hits zero.
+    function creatorCreatesToday(address creator)
+        external
+        view
+        returns (uint256 count, uint256 remaining)
+    {
+        uint256 today = block.timestamp / SECONDS_PER_DAY;
+        count = creatorCreatesPerDay[creator][today];
+        remaining = count >= MAX_CREATES_PER_DAY
+            ? 0
+            : MAX_CREATES_PER_DAY - count;
     }
 
     /// @notice Live payout preview for the bet sheet. Accounts for the new bet entering the pool.

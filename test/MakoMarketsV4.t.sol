@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Test, console} from "forge-std/Test.sol";
+import {Test, console, Vm} from "forge-std/Test.sol";
 import {MakoMarketsV4} from "../src/MakoMarketsV4.sol";
 
 // ---------------------------------------------------------------------------
@@ -123,21 +123,31 @@ contract MakoMarketsV4Test is Test {
             vm.prank(users[i]);
             usdc.approve(address(mako), type(uint256).max);
         }
+
+        // The test contract itself is the creator for every helper-built
+        // market and must pay the bundled creator seed (1 USDC). Fund and
+        // approve so helpers don't have to.
+        usdc.mint(address(this), 10_000 * ONE_USDC);
+        usdc.approve(address(mako), type(uint256).max);
     }
 
     function _createCryptoMarket() internal returns (uint256 id) {
         // Crypto 1-hour market: betting closes at 30 min (50% tier), resolves at 1h.
+        // Bundled seed: 1 USDC on YES (creator is the test contract).
         id = mako.createMarket(
             MakoMarketsV4.MarketType.CRYPTO,
             bytes32("ETH:gt:3500"),
             uint64(block.timestamp + 30 minutes),
             uint64(block.timestamp + 1 hours),
-            "Will ETH close above $3500?"
+            "Will ETH close above $3500?",
+            ONE_USDC,
+            true
         );
     }
 
     function _createFootballMarket() internal returns (uint256 id) {
-        // Football: kickoff at 1h, match ends ~2h30m (90 min game + buffer), resolves then.
+        // Football: kickoff at 1h, match ends ~2h30m, resolves then.
+        // Bundled seed: 1 USDC on YES.
         uint64 kickoff = uint64(block.timestamp + 1 hours);
         uint64 matchEnd = uint64(block.timestamp + 2 hours);
         id = mako.createMarket(
@@ -145,12 +155,15 @@ contract MakoMarketsV4Test is Test {
             bytes32("514237:home_win:0"),
             kickoff,
             matchEnd,
-            "Will Arsenal beat Chelsea?"
+            "Will Arsenal beat Chelsea?",
+            ONE_USDC,
+            true
         );
     }
 
     function _createBasketballMarket() internal returns (uint256 id) {
-        // Basketball: tipoff at 1h, game ends ~3h (2h + buffer), resolves then.
+        // Basketball: tipoff at 1h, game ends ~3h, resolves then.
+        // Bundled seed: 1 USDC on YES.
         uint64 tipoff = uint64(block.timestamp + 1 hours);
         uint64 gameEnd = uint64(block.timestamp + 3 hours);
         id = mako.createMarket(
@@ -158,7 +171,9 @@ contract MakoMarketsV4Test is Test {
             bytes32("18923:home_win:0"),
             tipoff,
             gameEnd,
-            "Will the Lakers beat the Celtics?"
+            "Will the Lakers beat the Celtics?",
+            ONE_USDC,
+            true
         );
     }
 
@@ -184,8 +199,11 @@ contract MakoMarketsV4Test is Test {
         vm.prank(alice);
         mako.claim(id);
 
-        // alice is the only YES bettor. payoutPool = 100 * 0.97 = 97 USDC → all hers.
-        assertEq(usdc.balanceOf(alice) - before_, 97 * ONE_USDC);
+        // Pool = 1 (creator seed YES, from test contract via helper) + 60 (alice YES) + 40 (bob NO) = 101.
+        // payoutPool = 101 * 0.97 = 97.97 USDC. Alice has 60/61 of YES side.
+        // Alice payout = floor(60 * 97_970_000 / 61) = 96_363_934.
+        // Test contract holds the other 1.6 USDC as creator seed share (not claimed here).
+        assertEq(usdc.balanceOf(alice) - before_, 96_363_934);
     }
 
     // ------------------------------------------------------------------
@@ -199,15 +217,19 @@ contract MakoMarketsV4Test is Test {
         vm.prank(bob);
         mako.placeBet(id, false, 40 * ONE_USDC);
 
-        // previewPayout simulates the new bet entering the pool:
-        //   newYes=70, newNo=40, total=110, fees=3%, payoutPool=106.7
-        //   return = 10 * 106.7 / 70 ≈ 15.242857 USDC
+        // Pool with creator seed: 1 (helper seed YES) + 60 (alice YES) + 40 (bob NO) = 101.
+        // previewPayout simulates a +10 YES bet entering:
+        //   newYes = 1 + 60 + 10 = 71, newNo = 40, total = 111
+        //   fees 3% → payoutPool = 111 * 0.97 = 107.67
+        //   return = floor(10_000_000 * 107_670_000 / 71_000_000) = 15_164_788
         uint256 preview = mako.previewPayout(id, true, 10 * ONE_USDC);
-        assertApproxEqAbs(preview, 15_242_857, 1); // 1 micro-USDC tolerance
+        assertApproxEqAbs(preview, 15_164_788, 1);
 
-        // Live multiplier for YES side (pre-new-bet) = 100*0.97/60 ≈ 1.6167x
+        // Live multiplier for YES side pre-new-bet = pool * 0.97 / yesTotal
+        //   = 101_000_000 * 9700 / 10000 / 61_000_000 * 1e18 (Solidity floor math)
+        //   = 97_970_000 * 1e18 / 61_000_000 ≈ 1.6060655737...
         uint256 mul = mako.multiplier(id, true);
-        assertApproxEqAbs(mul, 1.616666666666666666 ether, 1e12);
+        assertApproxEqAbs(mul, 1.606065573770491803 ether, 1e12);
     }
 
     // ------------------------------------------------------------------
@@ -276,7 +298,9 @@ contract MakoMarketsV4Test is Test {
             bytes32("18923:home_win:0"),
             uint64(block.timestamp + 1 hours),
             uint64(block.timestamp + 1 hours),
-            "Will the Lakers beat the Celtics?"
+            "Will the Lakers beat the Celtics?",
+            ONE_USDC,
+            true
         );
 
         vm.prank(alice);
@@ -290,7 +314,8 @@ contract MakoMarketsV4Test is Test {
         uint256 before_ = usdc.balanceOf(carol);
         vm.prank(carol);
         mako.claimCreatorFee(id);
-        assertEq(usdc.balanceOf(carol) - before_, 2 * ONE_USDC); // 2% of 100 USDC
+        // Pool = 1 (carol's creator seed) + 60 + 40 = 101 USDC. 2% = 2.02 USDC.
+        assertEq(usdc.balanceOf(carol) - before_, 2_020_000);
 
         vm.prank(carol);
         vm.expectRevert(MakoMarketsV4.AlreadyClaimed.selector);
@@ -308,7 +333,8 @@ contract MakoMarketsV4Test is Test {
         mako.placeBet(id, false, 40 * ONE_USDC);
         vm.warp(block.timestamp + 2 hours);
         mako.resolveMarket(id, MakoMarketsV4.Outcome.YES);
-        assertEq(mako.treasuryBalance(), 1 * ONE_USDC); // 1% of 100 USDC
+        // Pool = 1 (creator seed) + 60 + 40 = 101 USDC. Protocol fee = 1% = 1.01 USDC.
+        assertEq(mako.treasuryBalance(), 1_010_000);
     }
 
     // ------------------------------------------------------------------
@@ -346,7 +372,9 @@ contract MakoMarketsV4Test is Test {
         uint256 before_ = usdc.balanceOf(bob);
         vm.prank(bob);
         mako.claim(id);
-        assertEq(usdc.balanceOf(bob) - before_, 97 * ONE_USDC);
+        // Pool = 1 (creator seed YES) + 30 (alice YES) + 70 (bob NO) = 101.
+        // payoutPool = 97.97. NO wins. Bob is sole NO bettor → gets all 97.97 = 97_970_000.
+        assertEq(usdc.balanceOf(bob) - before_, 97_970_000);
     }
 
     // ------------------------------------------------------------------
@@ -366,14 +394,20 @@ contract MakoMarketsV4Test is Test {
             bytes32("ETH:gt:3500"),
             uint64(block.timestamp + 30 minutes),
             uint64(block.timestamp + 1 hours),
-            "Will ETH close above $3500?"
+            "Will ETH close above $3500?",
+            ONE_USDC,
+            true
         );
 
         vm.prank(alice);
         mako.placeBet(id, true, 60 * ONE_USDC);
 
+        // Skip past carol's seed cooldown (her create just set lastBetTime).
+        vm.warp(block.timestamp + 31);
+
         // Carol (creator) plants 1 USDC on NO hoping to unlock the fee.
-        // 1/60 = 1.67% — below the 4.08% dynamic threshold.
+        // Pool composition: 1 carol_seed_YES + 60 alice_YES + 1 carol_NO = 62.
+        // Carol NO / Alice YES ratio = 1/61 = 1.64% — below 4.08% threshold.
         vm.prank(carol);
         mako.placeBet(id, false, 1 * ONE_USDC);
 
@@ -383,19 +417,19 @@ contract MakoMarketsV4Test is Test {
         MakoMarketsV4.Market memory m = mako.getMarket(id);
         assertEq(uint8(m.outcome), uint8(MakoMarketsV4.Outcome.YES));
 
-        // Alice gets a regular parimutuel payout over the full 61-USDC pool.
+        // Below threshold → creator fee forfeited from payout math.
+        // Winners (carol_seed + alice) split totalPool * (1 - protocolFee) = 62 * 0.99 = 61.38 USDC.
+        // Alice has 60 of 61 YES → 60 * 61_380_000 / 61 = 60_373_770 (floor).
+        // Carol's seed share = 1 * 61_380_000 / 61 = 1_006_229. Total drains within 1 base unit.
         uint256 aliceBefore = usdc.balanceOf(alice);
         vm.prank(alice);
         mako.claim(id);
-        // Below threshold → creator fee forfeited from payout math.
-        // Winners split totalPool * (1 - protocolFee) = 61 * 0.99 = 60.39 USDC.
-        // This is what "no strand" looks like: no fund is left in the
-        // contract for this market after all claims + treasury are drained.
-        assertApproxEqAbs(usdc.balanceOf(alice) - aliceBefore, 60_390_000, 1);
+        assertApproxEqAbs(usdc.balanceOf(alice) - aliceBefore, 60_373_770, 1);
 
-        // Carol cannot claim — she bet on the losing side.
+        // Carol claims — she has a YES position from the creator seed (1 USDC).
+        // Pool 62, payoutPool 61.38, carol has 1/61 of YES → ~1_006_229 base units.
+        // Her 1 USDC NO bet is lost (NO didn't win).
         vm.prank(carol);
-        vm.expectRevert(MakoMarketsV4.NoPosition.selector);
         mako.claim(id);
 
         // Carol tries to claim the creator fee; the call succeeds but pays
@@ -429,11 +463,14 @@ contract MakoMarketsV4Test is Test {
         MakoMarketsV4.Market memory m = mako.getMarket(id);
         assertEq(uint8(m.outcome), uint8(MakoMarketsV4.Outcome.YES));
 
-        // Alice payout: 60 * (63 * 0.97) / 60 = 61.11 USDC
+        // Pool: 1 (seed YES) + 60 alice_YES + 3 bob_NO = 64.
+        // minSide/maxSide = 3/61 = 4.918% > 4.08% threshold → creator fee unlocks.
+        // payoutPool = 64 * 0.97 = 62.08 USDC. Alice has 60/61 of YES side.
+        // Payout = floor(60 * 62_080_000 / 61) = 61_062_295.
         uint256 aliceBefore = usdc.balanceOf(alice);
         vm.prank(alice);
         mako.claim(id);
-        assertApproxEqAbs(usdc.balanceOf(alice) - aliceBefore, 61_110_000, 1);
+        assertApproxEqAbs(usdc.balanceOf(alice) - aliceBefore, 61_062_295, 1);
     }
 
     // ------------------------------------------------------------------
@@ -487,7 +524,9 @@ contract MakoMarketsV4Test is Test {
             bytes32("ETH:gt:3500"),
             uint64(block.timestamp + 30 minutes),
             uint64(block.timestamp + 1 hours),
-            "Will ETH close above $3500?"
+            "Will ETH close above $3500?",
+            ONE_USDC,
+            true
         );
 
         vm.prank(alice);
@@ -502,14 +541,15 @@ contract MakoMarketsV4Test is Test {
         MakoMarketsV4.Market memory m = mako.getMarket(id);
         assertEq(uint8(m.outcome), uint8(MakoMarketsV4.Outcome.YES));
 
-        // Below threshold → creator fee forfeited, drops out of payout math.
-        // Alice wins 61 * 0.99 = 60.39 USDC. The forgone 2% would have been
-        // creator fee; instead of stranding it in the contract it flows to
-        // winners (keeps accounting closed: total out = total in).
+        // Pool: 1 (carol_seed_YES) + 60 alice_YES + 1 bob_NO = 62.
+        // minSide/maxSide = 1/61 = 1.64% < 4.08% → creator fee forfeited.
+        // payoutPool with fee forfeit = 62 * 0.99 = 61.38 USDC.
+        // Alice has 60/61 of YES → floor(60 * 61_380_000 / 61) = 60_373_770.
+        // Carol's seed share = 1_006_229; combined drains pool within 1 base unit dust.
         uint256 aliceBefore = usdc.balanceOf(alice);
         vm.prank(alice);
         mako.claim(id);
-        assertApproxEqAbs(usdc.balanceOf(alice) - aliceBefore, 60_390_000, 1);
+        assertApproxEqAbs(usdc.balanceOf(alice) - aliceBefore, 60_373_770, 1);
 
         // Bob bet on NO, loses, cannot claim anything.
         vm.prank(bob);
@@ -517,13 +557,14 @@ contract MakoMarketsV4Test is Test {
         mako.claim(id);
 
         // Creator fee forfeited — the claim call succeeds but transfers zero.
+        // Carol can also claim her creator-seed YES share (it's a real bet).
         uint256 carolBefore = usdc.balanceOf(carol);
         vm.prank(carol);
         mako.claimCreatorFee(id);
         assertEq(usdc.balanceOf(carol), carolBefore);
 
-        // Protocol fee DID accrue at resolution: 1% of 61 = 0.61 USDC.
-        assertEq(mako.treasuryBalance(), 610_000);
+        // Pool 62 USDC × 1% protocol fee = 620_000.
+        assertEq(mako.treasuryBalance(), 620_000);
     }
 
     // ------------------------------------------------------------------
@@ -588,22 +629,29 @@ contract MakoMarketsV4Test is Test {
     //     paid the fee but was still unprofitable by 0.5 USDC.
     // ------------------------------------------------------------------
     function test_creatorAttacker_isUnprofitable_belowThreshold() public {
+        // Capture BEFORE createMarket so the seed bet outlay is included
+        // in the carol-side accounting (the seed is a real USDC commitment,
+        // not free market creation).
+        uint256 carolInitial = usdc.balanceOf(carol);
         vm.prank(carol);
         uint256 id = mako.createMarket(
             MakoMarketsV4.MarketType.BASKETBALL,
             bytes32("18923:home_win:0"),
             uint64(block.timestamp + 1 hours),
             uint64(block.timestamp + 1 hours),
-            "Will the Lakers beat the Celtics?"
+            "Will the Lakers beat the Celtics?",
+            ONE_USDC,
+            true
         );
 
         vm.prank(alice);
         mako.placeBet(id, true, 60 * ONE_USDC);
 
-        uint256 carolInitial = usdc.balanceOf(carol);
+        // Skip past carol's seed cooldown (her create just set lastBetTime).
+        vm.warp(block.timestamp + 31);
 
-        // Bet 1 USDC (MIN_BET) on NO — 1.67% of 60, well below the 4.08%
-        // threshold. Creator fee forfeited.
+        // Bet 1 USDC on NO — 1.64% of YES side (60+1 seed), below 4.08% threshold.
+        // Creator fee forfeited.
         vm.prank(carol);
         mako.placeBet(id, false, ONE_USDC);
 
@@ -618,15 +666,20 @@ contract MakoMarketsV4Test is Test {
         vm.prank(carol);
         mako.claimCreatorFee(id);
 
-        // Carol bet NO, can't claim as a winner.
+        // Carol claims her creator-seed YES share. Pool 62, payoutPool 61.38,
+        // carol has 1/61 of YES → floor(1 * 61_380_000 / 61) = 1_006_229.
         vm.prank(carol);
-        vm.expectRevert(MakoMarketsV4.NoPosition.selector);
         mako.claim(id);
 
         uint256 carolFinal = usdc.balanceOf(carol);
+        // Carol total outlay: 1 USDC (seed at create) + 1 USDC (NO bet) = 2.
+        // Recovery: 1_006_229 (seed YES share) + 0 (creator fee forfeit).
+        // Net loss = 2_000_000 - 1_006_229 = 993_771. Attack is still
+        // unprofitable — the bundled-seed actually shifts a sliver of the
+        // forfeited creator fee back to creator-as-bettor, but the NO bet
+        // outlay still dominates.
         uint256 netLoss = carolInitial - carolFinal;
-        // Loses the full bet amount, zero offsetting fee revenue.
-        assertEq(netLoss, ONE_USDC);
+        assertApproxEqAbs(netLoss, 2 * ONE_USDC - 1_006_229, 3);
     }
 
     // ------------------------------------------------------------------
@@ -641,7 +694,9 @@ contract MakoMarketsV4Test is Test {
             bytes32("18923:home_win:0"),
             uint64(block.timestamp + 1 hours),
             uint64(block.timestamp + 1 hours),
-            "Will the Lakers beat the Celtics?"
+            "Will the Lakers beat the Celtics?",
+            ONE_USDC,
+            true
         );
 
         vm.prank(alice);
@@ -656,8 +711,8 @@ contract MakoMarketsV4Test is Test {
         uint256 carolBefore = usdc.balanceOf(carol);
         vm.prank(carol);
         mako.claimCreatorFee(id);
-        // Fee = 2% of 63 = 1.26 USDC
-        assertEq(usdc.balanceOf(carol) - carolBefore, 1_260_000);
+        // Pool = 1 (carol's creator seed YES) + 60 + 3 = 64 USDC. Fee = 2% of 64 = 1.28 USDC.
+        assertEq(usdc.balanceOf(carol) - carolBefore, 1_280_000);
     }
 
     // ------------------------------------------------------------------
@@ -686,7 +741,8 @@ contract MakoMarketsV4Test is Test {
         uint256 before_ = usdc.balanceOf(alice);
         vm.prank(alice);
         mako.claim(id);
-        assertEq(usdc.balanceOf(alice) - before_, 97 * ONE_USDC);
+        // Pool 101 (1 seed + 60 + 40); payoutPool 97.97. Alice has 60/61 of YES.
+        assertEq(usdc.balanceOf(alice) - before_, 96_363_934);
     }
 
     // ------------------------------------------------------------------
@@ -707,16 +763,17 @@ contract MakoMarketsV4Test is Test {
     // ------------------------------------------------------------------
     function test_belowMin_reverts() public {
         uint256 id = _createCryptoMarket();
+        uint256 belowMin = mako.MIN_BET() - 1;
         vm.prank(alice);
         vm.expectRevert(MakoMarketsV4.BelowMin.selector);
-        mako.placeBet(id, true, ONE_USDC - 1); // 0.999999 USDC
+        mako.placeBet(id, true, belowMin);
     }
 
     // ------------------------------------------------------------------
-    // 19. MIN_BET is the canonical 1_000_000 (1.00 USDC at 6 decimals)
+    // 19. MIN_BET is the canonical 100_000 (0.10 USDC at 6 decimals)
     // ------------------------------------------------------------------
     function test_minBet_constant() public view {
-        assertEq(mako.MIN_BET(), 1_000_000);
+        assertEq(mako.MIN_BET(), 100_000);
     }
 
     // ------------------------------------------------------------------
@@ -781,8 +838,12 @@ contract MakoMarketsV4Test is Test {
 
     // ------------------------------------------------------------------
     // 25. Fee-on-transfer token triggers TransferAmountMismatch
+    //
+    //     Originally tested at placeBet, but with bundled creator-seed
+    //     the first safeTransferFrom now happens inside createMarket
+    //     itself — so the fot revert surfaces there.
     // ------------------------------------------------------------------
-    function test_feeOnTransferToken_revertsOnPlaceBet() public {
+    function test_feeOnTransferToken_revertsOnCreateMarket() public {
         FeeOnTransferUSDC fot = new FeeOnTransferUSDC();
         MakoMarketsV4 fotMako = new MakoMarketsV4(treasury, address(fot));
 
@@ -791,17 +852,16 @@ contract MakoMarketsV4Test is Test {
         fot.approve(address(fotMako), type(uint256).max);
 
         vm.prank(alice);
-        uint256 id = fotMako.createMarket(
+        vm.expectRevert(MakoMarketsV4.TransferAmountMismatch.selector);
+        fotMako.createMarket(
             MakoMarketsV4.MarketType.CRYPTO,
             bytes32("ETH:gt:3500"),
             uint64(block.timestamp + 30 minutes),
             uint64(block.timestamp + 1 hours),
-            "Will ETH close above $3500?"
+            "Will ETH close above $3500?",
+            ONE_USDC,
+            true
         );
-
-        vm.prank(alice);
-        vm.expectRevert(MakoMarketsV4.TransferAmountMismatch.selector);
-        fotMako.placeBet(id, true, 10 * ONE_USDC);
     }
 
     // ------------------------------------------------------------------
@@ -854,21 +914,24 @@ contract MakoMarketsV4Test is Test {
         vm.warp(block.timestamp + 2 hours);
         mako.resolveMarket(id, MakoMarketsV4.Outcome.YES);
 
-        // Treasury accrual uses the SNAPSHOTTED 1%, not the new 2%.
-        assertEq(mako.treasuryBalance(), 1 * ONE_USDC);
+        // Treasury accrual uses the SNAPSHOTTED 1%, not the new 2%. Pool
+        // is 101 (creator seed 1 + alice 60 + bob 40); protocol fee = 1.01 USDC.
+        assertEq(mako.treasuryBalance(), 1_010_000);
 
         // Winner payout uses the SNAPSHOTTED 1%+2%=3% fee, not 5%.
-        // 60 YES, 40 NO, YES wins. payoutPool = 100 * 0.97 = 97. Alice gets all.
+        // Pool = 101, payoutPool = 97.97. Alice has 60/61 of YES side.
+        // Alice payout = 60 * 97_970_000 / 61 = 96_363_934 (floor).
+        // Test contract holds the remaining 1.6 USDC YES share (creator seed).
         uint256 aliceBefore = usdc.balanceOf(alice);
         vm.prank(alice);
         mako.claim(id);
-        assertEq(usdc.balanceOf(alice) - aliceBefore, 97 * ONE_USDC);
+        assertEq(usdc.balanceOf(alice) - aliceBefore, 96_363_934);
 
-        // Creator fee uses SNAPSHOTTED 2% = 2 USDC, not new 3% = 3 USDC.
-        // This test contract is the market creator (the default path).
+        // Creator fee uses SNAPSHOTTED 2% of pool, not new 3%.
+        // Pool 101 USDC × 2% = 2.02 USDC = 2_020_000.
         uint256 testBefore = usdc.balanceOf(address(this));
         mako.claimCreatorFee(id);
-        assertEq(usdc.balanceOf(address(this)) - testBefore, 2 * ONE_USDC);
+        assertEq(usdc.balanceOf(address(this)) - testBefore, 2_020_000);
     }
 
     // ------------------------------------------------------------------
@@ -893,8 +956,9 @@ contract MakoMarketsV4Test is Test {
         uint256 aliceBefore = usdc.balanceOf(alice);
         vm.prank(alice);
         mako.claim(id);
-        // Still 97 USDC, not 100. Snapshot holds.
-        assertEq(usdc.balanceOf(alice) - aliceBefore, 97 * ONE_USDC);
+        // Pool 101 (1 seed + 60 + 40), payoutPool 97.97 from snapshot (not 100 — snapshot holds).
+        // Alice has 60/61 of YES → 96_363_934.
+        assertEq(usdc.balanceOf(alice) - aliceBefore, 96_363_934);
     }
 
     // ------------------------------------------------------------------
@@ -924,9 +988,10 @@ contract MakoMarketsV4Test is Test {
         mako.resolveMarket(id1, MakoMarketsV4.Outcome.YES);
         mako.resolveMarket(id2, MakoMarketsV4.Outcome.YES);
 
-        // Treasury credits: market 1 = 1 USDC (1% of 100), market 2 = 2 USDC
-        // (2% of 100). Total = 3 USDC.
-        assertEq(mako.treasuryBalance(), 3 * ONE_USDC);
+        // Each market pool = 1 (helper seed) + 60 + 40 = 101 USDC.
+        // Treasury credits: market 1 = 1% of 101 = 1.01 USDC, market 2 = 2% of 101 = 2.02 USDC.
+        // Total = 3.03 USDC = 3_030_000.
+        assertEq(mako.treasuryBalance(), 3_030_000);
 
         MakoMarketsV4.Market memory m1 = mako.getMarket(id1);
         MakoMarketsV4.Market memory m2 = mako.getMarket(id2);
@@ -955,41 +1020,56 @@ contract MakoMarketsV4Test is Test {
         vm.prank(dave);
         fresh.approve(address(m2), type(uint256).max);
 
-        // Dave is the creator; market is 60 YES (alice) / 1 NO (dave).
-        // Ratio 1.67% — below the 4.08% threshold.
+        // Dave is the creator. Bundled seed is 1 USDC on YES (not NO,
+        // so it doesn't perturb the 1 NO that Dave places later — the
+        // 60/1 ratio under test would be wrong if Dave's seed landed
+        // on NO too). After seed: 1 dave_YES_seed + (later 60 alice_YES)
+        // + (later 1 dave_NO) = 61 YES / 1 NO. Ratio 1/62 = 1.61%, still
+        // below the 4.08% forfeit threshold under test.
         vm.prank(dave);
         uint256 id = m2.createMarket(
             MakoMarketsV4.MarketType.CRYPTO,
             bytes32("ETH:gt:3500"),
             uint64(block.timestamp + 30 minutes),
             uint64(block.timestamp + 1 hours),
-            "Will ETH close above $3500?"
+            "Will ETH close above $3500?",
+            ONE_USDC,
+            true
         );
+
+        // Skip past the 30s rate-limit cooldown so dave can also place
+        // his subsequent NO bet without hitting BetTooSoon.
+        vm.warp(block.timestamp + 31);
         vm.prank(alice);
         m2.placeBet(id, true, 60 * ONE_USDC);
         vm.prank(dave);
         m2.placeBet(id, false, ONE_USDC);
 
         uint256 contractBalBefore = fresh.balanceOf(address(m2));
-        assertEq(contractBalBefore, 61 * ONE_USDC);
+        // Pool with seed: 1 (dave seed YES) + 60 (alice YES) + 1 (dave NO) = 62.
+        assertEq(contractBalBefore, 62 * ONE_USDC);
 
         vm.warp(block.timestamp + 2 hours);
         m2.resolveMarket(id, MakoMarketsV4.Outcome.YES);
 
-        // Alice claims her winnings (60.39).
+        // Alice claims her 60/61 share of payoutPool 61.38 = 60_373_770.
         vm.prank(alice);
+        m2.claim(id);
+
+        // Dave claims his creator-seed YES share (1/61 of 61.38 = 1_006_229).
+        vm.prank(dave);
         m2.claim(id);
 
         // Creator calls claimCreatorFee — forfeit path, pays zero.
         vm.prank(dave);
         m2.claimCreatorFee(id);
 
-        // Owner sweeps treasury (0.61).
+        // Owner sweeps treasury (1% of 62 = 0.62 USDC).
         m2.withdrawTreasury();
 
-        // The contract's USDC balance should now be exactly zero for this
-        // market's pool. Everything that went in went out: 61 = 60.39 + 0.61.
-        assertEq(fresh.balanceOf(address(m2)), 0);
+        // Contract balance: dust ≤ N-1 where N = 2 winners on YES side
+        // (alice + dave seed). Floor-division residual ≤ 1 base unit.
+        assertLe(fresh.balanceOf(address(m2)), 1);
         // And no pending treasury obligation either.
         assertEq(m2.treasuryBalance(), 0);
     }
@@ -1025,7 +1105,9 @@ contract MakoMarketsV4Test is Test {
         vm.warp(block.timestamp + 2 hours);
         mako.resolveMarket(id, MakoMarketsV4.Outcome.YES);
 
-        // Drain everything.
+        // Drain everything. With the helper's bundled creator seed (1 USDC
+        // YES from test contract), there are 4 winners on the YES side
+        // (test contract + alice + bob + carol). Drain all four.
         uint256 totalPayout = 0;
         for (uint256 i = 0; i < winners.length; i++) {
             uint256 before_ = usdc.balanceOf(winners[i]);
@@ -1033,20 +1115,23 @@ contract MakoMarketsV4Test is Test {
             mako.claim(id);
             totalPayout += usdc.balanceOf(winners[i]) - before_;
         }
+        // Test contract (creator) also claims its 1 USDC seed YES share.
+        uint256 selfBefore = usdc.balanceOf(address(this));
+        mako.claim(id);
+        totalPayout += usdc.balanceOf(address(this)) - selfBefore;
+
         mako.claimCreatorFee(id);
         mako.withdrawTreasury();
 
-        // payoutPool = 10 USDC * 0.97 = 9.7 = 9_700_000 microUSDC.
-        // Floor shares: 1/7 → 1_385_714, 2/7 → 2_771_428, 4/7 → 5_542_857.
-        // Sum = 9_699_999. Residual = 1 microUSDC.
-        uint256 payoutPool = 9_700_000;
+        // Pool = 1 (seed YES) + 1+2+4 (alice/bob/carol YES) + 3 (dave NO) = 11 USDC.
+        // payoutPool = 11 * 0.97 = 10.67 USDC = 10_670_000 base units.
+        // YES side total = 8 (1+1+2+4). Floor shares sum slightly under 10_670_000.
+        uint256 payoutPool = 10_670_000;
         uint256 residual = payoutPool - totalPayout;
-        // Bound: at most (N - 1) base units with N = 3 winners → <= 2.
-        assertLe(residual, winners.length - 1);
+        // Bound: at most (N - 1) with N = 4 winners → <= 3.
+        assertLe(residual, 3);
 
-        // Contract USDC balance == residual (nothing else attributable to
-        // this market). The strand is ≤ 2 microUSDC ≈ $0.000002 — the
-        // bounded floor-division dust.
+        // Contract USDC balance == residual after all settled.
         assertEq(usdc.balanceOf(address(mako)), residual);
     }
 
@@ -1073,12 +1158,18 @@ contract MakoMarketsV4Test is Test {
             fresh.approve(address(m2), type(uint256).max);
         }
 
+        // Test contract is the creator and pays the bundled seed.
+        fresh.mint(address(this), 10 * ONE_USDC);
+        fresh.approve(address(m2), type(uint256).max);
+
         uint256 id = m2.createMarket(
             MakoMarketsV4.MarketType.CRYPTO,
             bytes32("ETH:gt:3500"),
             uint64(block.timestamp + 30 minutes),
             uint64(block.timestamp + 1 hours),
-            "q"
+            "q",
+            ONE_USDC,
+            true
         );
 
         for (uint256 i = 0; i < winners.length; i++) {
@@ -1098,21 +1189,29 @@ contract MakoMarketsV4Test is Test {
             m2.claim(id);
             totalPayout += fresh.balanceOf(winners[i]) - before_;
         }
+        // Test contract is also a winner via its 1 USDC YES seed.
+        uint256 selfBefore = fresh.balanceOf(address(this));
+        m2.claim(id);
+        totalPayout += fresh.balanceOf(address(this)) - selfBefore;
+
         m2.claimCreatorFee(id);
         m2.withdrawTreasury();
 
-        // Below-threshold: winners split totalPool * (1 - protocolFee).
-        //   totalPool = 61 USDC, payoutPool = 61 * 0.99 = 60.39 USDC = 60_390_000.
-        //   Alice 30/60 * 60_390_000 = 30_195_000 (exact).
-        //   Bob   20/60 * 60_390_000 = 20_130_000 (exact).
-        //   Carol 10/60 * 60_390_000 = 10_065_000 (exact).
-        //   Sum = 60_390_000. Zero dust in this particular partition.
-        assertEq(totalPayout, 60_390_000);
+        // Below-threshold forfeit: winners split totalPool * (1 - protocolFee).
+        //   Pool = 1 (seed YES) + 30+20+10 (winners YES) + 1 (dave NO) = 62 USDC.
+        //   payoutPool = 62 * 0.99 = 61.38 USDC = 61_380_000.
+        //   YES side total = 61. Floor shares per winner = stake_i * 61_380_000 / 61.
+        //     Seed (test contract) 1 USDC → 1_006_229
+        //     Alice 30 USDC → 30_186_885
+        //     Bob   20 USDC → 20_124_590
+        //     Carol 10 USDC → 10_062_295
+        //   Sum = 61_379_999. Residual 1 base unit dust.
+        assertApproxEqAbs(totalPayout, 61_380_000, 3);
 
-        // Residual <= (N-1) always; zero for this specific math but the bound is what
-        // matters for the audit-level invariant.
-        uint256 residual = 60_390_000 - totalPayout;
-        assertLe(residual, winners.length - 1);
+        // Residual <= N-1 base units where N = 4 winners on YES side
+        // (test contract seed + alice + bob + carol). payoutPool = 61_380_000.
+        uint256 residual = 61_380_000 - totalPayout;
+        assertLe(residual, 3);
         assertEq(fresh.balanceOf(address(m2)), residual);
     }
 
@@ -1156,7 +1255,8 @@ contract MakoMarketsV4Test is Test {
 
         uint256 treasuryBefore = usdc.balanceOf(treasury);
         mako.withdrawTreasury(); // owner == address(this)
-        assertEq(usdc.balanceOf(treasury) - treasuryBefore, 1 * ONE_USDC);
+        // Pool 101, protocol fee 1% = 1.01 USDC.
+        assertEq(usdc.balanceOf(treasury) - treasuryBefore, 1_010_000);
         assertEq(mako.treasuryBalance(), 0);
     }
 
@@ -1178,7 +1278,9 @@ contract MakoMarketsV4Test is Test {
             bytes32("x"),
             bettingClose,
             resolveAt,
-            "q"
+            "q",
+            ONE_USDC,
+            true
         );
 
         MakoMarketsV4.Market memory m = mako.getMarket(id);
@@ -1250,7 +1352,9 @@ contract MakoMarketsV4Test is Test {
             bytes32("x"),
             kickoff,
             matchEnd,
-            "q"
+            "q",
+            ONE_USDC,
+            true
         );
         MakoMarketsV4.Market memory m = mako.getMarket(id);
         assertEq(uint256(m.bettingCloseTime), uint256(kickoff));
@@ -1288,7 +1392,9 @@ contract MakoMarketsV4Test is Test {
             bytes32("x"),
             t0 - 1,
             t0 + 1 hours,
-            "q"
+            "q",
+            ONE_USDC,
+            true
         );
 
         // bettingCloseTime > closeTime.
@@ -1298,7 +1404,9 @@ contract MakoMarketsV4Test is Test {
             bytes32("x"),
             t0 + 2 hours,
             t0 + 1 hours,
-            "q"
+            "q",
+            ONE_USDC,
+            true
         );
 
         // 4 min < MIN_DURATION (5 min) → revert.
@@ -1308,7 +1416,9 @@ contract MakoMarketsV4Test is Test {
             bytes32("x"),
             t0 + 3 minutes,
             t0 + 4 minutes,
-            "q"
+            "q",
+            ONE_USDC,
+            true
         );
 
         // 5 min + 1s → succeeds.
@@ -1317,7 +1427,9 @@ contract MakoMarketsV4Test is Test {
             bytes32("x"),
             t0 + 5 minutes,
             t0 + 5 minutes + 1,
-            "q"
+            "q",
+            ONE_USDC,
+            true
         );
     }
 
@@ -1502,13 +1614,16 @@ contract MakoMarketsV4Test is Test {
         // Alice 1 YES, Bob 1 NO, Carol 1 NO … (keep everyone under 20%)
         // End state target: newPool == 10. Tricky with 20% cap.
         // Approach: seed with 3 wallets 3 USDC each on various sides.
+        // Pool already starts at 1 (helper creator seed YES). Build to 9
+        // with alice/bob/carol so dave's +1 USDC pushes pool to exactly 10
+        // (preserving the "exactly at threshold" test intent).
         vm.prank(alice);
         mako.placeBet(id, true, 3 * ONE_USDC);
         vm.prank(bob);
         mako.placeBet(id, false, 4 * ONE_USDC);
         vm.prank(carol);
-        mako.placeBet(id, false, 2 * ONE_USDC);
-        // Pool = 9. Still below threshold (10), cap skipped.
+        mako.placeBet(id, false, 1 * ONE_USDC);
+        // Pool = 1 (seed) + 3 + 4 + 1 = 9. Still below threshold (10), cap skipped.
 
         // Now a fourth bet of exactly 1 USDC pushes the pool to exactly 10
         // (== threshold). Cap activates. Dave 1/10 = 10% → well under 20%.
@@ -1567,13 +1682,678 @@ contract MakoMarketsV4Test is Test {
         mako.resolveMarket(id, MakoMarketsV4.Outcome.YES);
 
         // Alice (blocked) can still claim her winnings.
+        // Pool 101, payoutPool 97.97, alice 60/61 of YES → 96_363_934.
         uint256 aliceBefore = usdc.balanceOf(alice);
         vm.prank(alice);
         mako.claim(id);
-        assertEq(usdc.balanceOf(alice) - aliceBefore, 97 * ONE_USDC);
+        assertEq(usdc.balanceOf(alice) - aliceBefore, 96_363_934);
 
         // And creator fee claim works for a blocked creator if applicable —
         // in this case the test contract is creator. (Sanity: no revert
         // from the block gate anywhere in the claim paths.)
+    }
+
+    // ======================================================================
+    // Slice 2 — creator-seed + MAKO + MarketType expansion + owner alignment
+    //
+    // 17 new tests covering the round-7-cleared design:
+    //   - 6 creator-seed branches (sub-MIN reject, YES + NO side recording,
+    //     cooldown, constant pin, blocklist reject). The fee-on-transfer
+    //     seed-transfer case is covered by the renamed
+    //     test_feeOnTransferToken_revertsOnCreateMarket above, not duplicated
+    //     here.
+    //   - 6 MAKO-type branches (owner gate, non-owner reject, nonzero-seed
+    //     reject, fee-snapshot zeroing, happy bet+claim, claimCreatorFee noop)
+    //   - 4 new-enum smoke (FOREX / COMMODITIES / STOCKS happy + stability v2)
+    //   - 1 owner-alignment regression (post-rotation rejection)
+    // ======================================================================
+
+    // ------------------------------------------------------------------
+    // S2-1. createMarket with seed below MIN_CREATOR_SEED reverts
+    // ------------------------------------------------------------------
+    function test_createMarket_belowCreatorSeed_reverts() public {
+        uint256 belowMin = mako.MIN_CREATOR_SEED() - 1;
+        vm.expectRevert(MakoMarketsV4.CreatorSeedTooSmall.selector);
+        mako.createMarket(
+            MakoMarketsV4.MarketType.CRYPTO,
+            bytes32("x"),
+            uint64(block.timestamp + 30 minutes),
+            uint64(block.timestamp + 1 hours),
+            "q",
+            belowMin,
+            true
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // S2-2. Seed lands as creator's first bet on the chosen side (YES);
+    //       yesBets / totalYes / yesBettorCount updated; BetPlaced emitted.
+    // ------------------------------------------------------------------
+    function test_createMarket_seedRecordedAsFirstBet() public {
+        vm.recordLogs();
+        uint256 id = _createCryptoMarket(); // helper seeds 1 USDC YES
+        MakoMarketsV4.Market memory m = mako.getMarket(id);
+
+        assertEq(mako.yesBets(id, address(this)), ONE_USDC);
+        assertEq(m.totalYes, ONE_USDC);
+        assertEq(uint256(m.yesBettorCount), 1);
+        assertEq(mako.noBets(id, address(this)), 0);
+        assertEq(m.totalNo, 0);
+        assertEq(uint256(m.noBettorCount), 0);
+
+        // BetPlaced event emitted alongside MarketCreated in the same tx.
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bool sawBetPlaced = false;
+        bytes32 betPlacedSig = keccak256("BetPlaced(uint256,address,bool,uint256)");
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics.length > 0 && logs[i].topics[0] == betPlacedSig) {
+                sawBetPlaced = true;
+                break;
+            }
+        }
+        assertTrue(sawBetPlaced, "BetPlaced not emitted for creator seed");
+    }
+
+    // ------------------------------------------------------------------
+    // S2-3. Seed on NO side records correctly (creatorYes = false).
+    // ------------------------------------------------------------------
+    function test_createMarket_seedNo_recordsOnNoSide() public {
+        uint256 id = mako.createMarket(
+            MakoMarketsV4.MarketType.CRYPTO,
+            bytes32("x"),
+            uint64(block.timestamp + 30 minutes),
+            uint64(block.timestamp + 1 hours),
+            "q",
+            ONE_USDC,
+            false
+        );
+        MakoMarketsV4.Market memory m = mako.getMarket(id);
+        assertEq(mako.noBets(id, address(this)), ONE_USDC);
+        assertEq(m.totalNo, ONE_USDC);
+        assertEq(uint256(m.noBettorCount), 1);
+        assertEq(m.totalYes, 0);
+        assertEq(uint256(m.yesBettorCount), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // S2-4. Seed sets lastBetTime; creator's next placeBet within
+    //       MIN_SECONDS_BETWEEN_BETS reverts BetTooSoon.
+    // ------------------------------------------------------------------
+    function test_createMarket_cooldownAppliesAfterSeed() public {
+        uint256 id = _createCryptoMarket();
+
+        // Test contract is creator; its placeBet within 30s of seed must revert.
+        usdc.approve(address(mako), type(uint256).max);
+        usdc.mint(address(this), 10 * ONE_USDC); // ensure funds for the would-be bet
+        vm.expectRevert(MakoMarketsV4.BetTooSoon.selector);
+        mako.placeBet(id, true, ONE_USDC);
+
+        // After cooldown: succeeds.
+        vm.warp(block.timestamp + 31);
+        mako.placeBet(id, true, ONE_USDC);
+    }
+
+    // ------------------------------------------------------------------
+    // S2-5. MIN_CREATOR_SEED constant pin: 1_000_000 base units (1.00 USDC).
+    // ------------------------------------------------------------------
+    function test_minCreatorSeed_constant() public view {
+        assertEq(mako.MIN_CREATOR_SEED(), 1_000_000);
+    }
+
+    // ------------------------------------------------------------------
+    // S2-6. Blocklisted wallet cannot create a non-MAKO market.
+    //       Seed = bet, blocked wallets cannot bet anywhere else → must
+    //       not slip through createMarket either.
+    // ------------------------------------------------------------------
+    function test_createMarket_blockedWallet_reverts() public {
+        mako.setBlocked(alice, true);
+        vm.prank(alice);
+        vm.expectRevert(MakoMarketsV4.WalletIsBlocked.selector);
+        mako.createMarket(
+            MakoMarketsV4.MarketType.CRYPTO,
+            bytes32("x"),
+            uint64(block.timestamp + 30 minutes),
+            uint64(block.timestamp + 1 hours),
+            "q",
+            ONE_USDC,
+            true
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // S2-7. MAKO market: owner can create with seed = 0; pool starts empty.
+    // ------------------------------------------------------------------
+    function test_createMakoMarket_byOwner_succeeds() public {
+        uint256 id = mako.createMarket(
+            MakoMarketsV4.MarketType.MAKO,
+            bytes32("mako:fed-rate-cut"),
+            uint64(block.timestamp + 1 hours),
+            uint64(block.timestamp + 2 hours),
+            "Will the Fed cut rates this month?",
+            0,
+            true
+        );
+        MakoMarketsV4.Market memory m = mako.getMarket(id);
+        assertEq(uint8(m.mType), uint8(MakoMarketsV4.MarketType.MAKO));
+        assertEq(m.totalYes, 0);
+        assertEq(m.totalNo, 0);
+        assertEq(uint256(m.creatorFeeBpsSnapshot), 0); // MAKO forfeits creator fee
+        assertEq(uint256(m.protocolFeeBpsSnapshot), 100); // 1% protocol fee still applies
+    }
+
+    // ------------------------------------------------------------------
+    // S2-8. MAKO market: non-owner cannot create.
+    // ------------------------------------------------------------------
+    function test_createMakoMarket_byNonOwner_reverts() public {
+        vm.prank(alice);
+        vm.expectRevert(MakoMarketsV4.NotOwnerForMakoMarket.selector);
+        mako.createMarket(
+            MakoMarketsV4.MarketType.MAKO,
+            bytes32("x"),
+            uint64(block.timestamp + 1 hours),
+            uint64(block.timestamp + 2 hours),
+            "q",
+            0,
+            true
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // S2-9. MAKO market with nonzero seed reverts CreatorSeedNotAllowed.
+    // ------------------------------------------------------------------
+    function test_createMakoMarket_withNonzeroSeed_reverts() public {
+        vm.expectRevert(MakoMarketsV4.CreatorSeedNotAllowed.selector);
+        mako.createMarket(
+            MakoMarketsV4.MarketType.MAKO,
+            bytes32("x"),
+            uint64(block.timestamp + 1 hours),
+            uint64(block.timestamp + 2 hours),
+            "q",
+            ONE_USDC, // disallowed for MAKO
+            true
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // S2-10. MAKO resolve path: protocol fee accrues at 1%, creator fee = 0.
+    //        Bettors get 99% payout (vs 97% for the other types).
+    // ------------------------------------------------------------------
+    function test_makoMarket_resolvePath_paysOnly1PctProtocolFee() public {
+        uint256 id = mako.createMarket(
+            MakoMarketsV4.MarketType.MAKO,
+            bytes32("mako:btc-price"),
+            uint64(block.timestamp + 1 hours),
+            uint64(block.timestamp + 2 hours),
+            "Will BTC close above $100k on Friday?",
+            0,
+            true
+        );
+
+        vm.prank(alice);
+        mako.placeBet(id, true, 60 * ONE_USDC);
+        vm.prank(bob);
+        mako.placeBet(id, false, 40 * ONE_USDC);
+
+        vm.warp(block.timestamp + 3 hours);
+        mako.resolveMarket(id, MakoMarketsV4.Outcome.YES);
+
+        // Pool 100 USDC, protocol fee 1% = 1 USDC. No creator fee.
+        assertEq(mako.treasuryBalance(), 1 * ONE_USDC);
+    }
+
+    // ------------------------------------------------------------------
+    // S2-11. MAKO happy path bet + claim: alice gets 99% payout (not 97%).
+    // ------------------------------------------------------------------
+    function test_makoMarket_betAndClaim_happyPath() public {
+        uint256 id = mako.createMarket(
+            MakoMarketsV4.MarketType.MAKO,
+            bytes32("mako:event"),
+            uint64(block.timestamp + 1 hours),
+            uint64(block.timestamp + 2 hours),
+            "Mako-curated question",
+            0,
+            true
+        );
+
+        vm.prank(alice);
+        mako.placeBet(id, true, 60 * ONE_USDC);
+        vm.prank(bob);
+        mako.placeBet(id, false, 40 * ONE_USDC);
+
+        vm.warp(block.timestamp + 3 hours);
+        mako.resolveMarket(id, MakoMarketsV4.Outcome.YES);
+
+        // Pool 100, payoutPool with no creator fee = 100 * 0.99 = 99 USDC.
+        // Alice is sole YES bettor → claims all 99 USDC.
+        uint256 before_ = usdc.balanceOf(alice);
+        vm.prank(alice);
+        mako.claim(id);
+        assertEq(usdc.balanceOf(alice) - before_, 99 * ONE_USDC);
+    }
+
+    // ------------------------------------------------------------------
+    // S2-12. claimCreatorFee on a MAKO market: succeeds but transfers 0.
+    //        Snapshot was zeroed at create; no special-case at claim time.
+    // ------------------------------------------------------------------
+    function test_makoMarket_claimCreatorFee_isZeroNoop() public {
+        uint256 id = mako.createMarket(
+            MakoMarketsV4.MarketType.MAKO,
+            bytes32("x"),
+            uint64(block.timestamp + 1 hours),
+            uint64(block.timestamp + 2 hours),
+            "q",
+            0,
+            true
+        );
+        vm.prank(alice);
+        mako.placeBet(id, true, 60 * ONE_USDC);
+        vm.prank(bob);
+        mako.placeBet(id, false, 40 * ONE_USDC);
+        vm.warp(block.timestamp + 3 hours);
+        mako.resolveMarket(id, MakoMarketsV4.Outcome.YES);
+
+        // Owner is the creator (address(this)). claimCreatorFee succeeds
+        // but transfers zero because the snapshot is 0.
+        uint256 before_ = usdc.balanceOf(address(this));
+        mako.claimCreatorFee(id);
+        assertEq(usdc.balanceOf(address(this)), before_);
+    }
+
+    // ------------------------------------------------------------------
+    // S2-13. FOREX market happy path — same rules as CRYPTO (seed required).
+    // ------------------------------------------------------------------
+    function test_createForexMarket_succeeds() public {
+        uint256 id = mako.createMarket(
+            MakoMarketsV4.MarketType.FOREX,
+            bytes32("EURUSD:gt:1.10"),
+            uint64(block.timestamp + 30 minutes),
+            uint64(block.timestamp + 1 hours),
+            "Will EUR/USD close above 1.10?",
+            ONE_USDC,
+            true
+        );
+        MakoMarketsV4.Market memory m = mako.getMarket(id);
+        assertEq(uint8(m.mType), uint8(MakoMarketsV4.MarketType.FOREX));
+        assertEq(m.totalYes, ONE_USDC);
+        assertEq(uint256(m.creatorFeeBpsSnapshot), 200); // non-MAKO gets full creator fee
+    }
+
+    // ------------------------------------------------------------------
+    // S2-14. COMMODITIES market happy path.
+    // ------------------------------------------------------------------
+    function test_createCommoditiesMarket_succeeds() public {
+        uint256 id = mako.createMarket(
+            MakoMarketsV4.MarketType.COMMODITIES,
+            bytes32("XAU:gt:2000"),
+            uint64(block.timestamp + 30 minutes),
+            uint64(block.timestamp + 1 hours),
+            "Will gold close above $2000?",
+            ONE_USDC,
+            true
+        );
+        MakoMarketsV4.Market memory m = mako.getMarket(id);
+        assertEq(uint8(m.mType), uint8(MakoMarketsV4.MarketType.COMMODITIES));
+    }
+
+    // ------------------------------------------------------------------
+    // S2-15. STOCKS market happy path.
+    // ------------------------------------------------------------------
+    function test_createStocksMarket_succeeds() public {
+        uint256 id = mako.createMarket(
+            MakoMarketsV4.MarketType.STOCKS,
+            bytes32("AAPL:gt:200"),
+            uint64(block.timestamp + 30 minutes),
+            uint64(block.timestamp + 1 hours),
+            "Will AAPL close above $200?",
+            ONE_USDC,
+            true
+        );
+        MakoMarketsV4.Market memory m = mako.getMarket(id);
+        assertEq(uint8(m.mType), uint8(MakoMarketsV4.MarketType.STOCKS));
+    }
+
+    // ------------------------------------------------------------------
+    // S2-16. Enum stability v2: append-only invariant. Original 3 entries
+    //        keep their numeric identities; 4 new entries land at 3..6.
+    //        Indexers + AA allowlists pin specific uint8 values; any
+    //        reordering breaks them. This test makes reordering loud.
+    // ------------------------------------------------------------------
+    function test_enumOrdering_isStable_v2() public pure {
+        assertEq(uint8(MakoMarketsV4.MarketType.FOOTBALL),    0);
+        assertEq(uint8(MakoMarketsV4.MarketType.CRYPTO),      1);
+        assertEq(uint8(MakoMarketsV4.MarketType.BASKETBALL),  2);
+        assertEq(uint8(MakoMarketsV4.MarketType.FOREX),       3);
+        assertEq(uint8(MakoMarketsV4.MarketType.COMMODITIES), 4);
+        assertEq(uint8(MakoMarketsV4.MarketType.STOCKS),      5);
+        assertEq(uint8(MakoMarketsV4.MarketType.MAKO),        6);
+    }
+
+    // ------------------------------------------------------------------
+    // S2-17. Owner-alignment regression: after transferOwnership rotates
+    //        ownership away from the deploy-time owner, the OLD owner can
+    //        no longer create MAKO markets — only the new owner can.
+    //        Locks in the deploy-script invariant that owner == admin Safe
+    //        is what gates MAKO creation.
+    // ------------------------------------------------------------------
+    function test_makoCreation_requiresOwnerEqualsAdminSafe() public {
+        // Transfer ownership to alice (simulating admin-Safe rotation).
+        mako.transferOwnership(alice);
+
+        // Old owner (test contract) can no longer create MAKO.
+        vm.expectRevert(MakoMarketsV4.NotOwnerForMakoMarket.selector);
+        mako.createMarket(
+            MakoMarketsV4.MarketType.MAKO,
+            bytes32("x"),
+            uint64(block.timestamp + 1 hours),
+            uint64(block.timestamp + 2 hours),
+            "q",
+            0,
+            true
+        );
+
+        // New owner (alice) can create MAKO.
+        vm.prank(alice);
+        uint256 id = mako.createMarket(
+            MakoMarketsV4.MarketType.MAKO,
+            bytes32("x"),
+            uint64(block.timestamp + 1 hours),
+            uint64(block.timestamp + 2 hours),
+            "q",
+            0,
+            true
+        );
+        MakoMarketsV4.Market memory m = mako.getMarket(id);
+        assertEq(uint8(m.mType), uint8(MakoMarketsV4.MarketType.MAKO));
+        assertEq(m.creator, alice);
+    }
+
+    // ======================================================================
+    // Daily creator-create cap (MAX_CREATES_PER_DAY = 10)
+    // ======================================================================
+    //
+    // Verifies the v4 redeploy slice 4f-contract invariant: a single wallet
+    // can create at most 10 non-MAKO markets per UTC day. MAKO is exempt.
+    // The cap resets at UTC midnight (block.timestamp / 86400 rollover).
+
+    /// Helper — create a single CRYPTO market as `creator`. Uses a unique
+    /// oracleRef per call so we don't accidentally collide on any future
+    /// per-oracleRef invariant; mints + approves fresh USDC so the cap is
+    /// the only thing standing between the caller and creation.
+    function _createCryptoAs(address creator, uint256 seed) internal returns (uint256 id) {
+        usdc.mint(creator, 2 * ONE_USDC);
+        vm.prank(creator);
+        usdc.approve(address(mako), type(uint256).max);
+        vm.prank(creator);
+        id = mako.createMarket(
+            MakoMarketsV4.MarketType.CRYPTO,
+            bytes32(uint256(0x1000000 + seed)),
+            uint64(block.timestamp + 30 minutes),
+            uint64(block.timestamp + 1 hours),
+            "q",
+            ONE_USDC,
+            true
+        );
+    }
+
+    function test_dailyCap_constants_match_spec() public view {
+        assertEq(mako.MAX_CREATES_PER_DAY(), 10);
+        assertEq(mako.SECONDS_PER_DAY(), 86400);
+    }
+
+    function test_dailyCap_allowsExactlyTenCreatesThenReverts() public {
+        // 10 successful creates within the same UTC day.
+        for (uint256 i = 0; i < 10; i++) {
+            _createCryptoAs(alice, i);
+        }
+        (uint256 count, uint256 remaining) = mako.creatorCreatesToday(alice);
+        assertEq(count, 10);
+        assertEq(remaining, 0);
+
+        // 11th fails with CreatorDailyCapExceeded.
+        usdc.mint(alice, 2 * ONE_USDC);
+        vm.prank(alice);
+        vm.expectRevert(MakoMarketsV4.CreatorDailyCapExceeded.selector);
+        mako.createMarket(
+            MakoMarketsV4.MarketType.CRYPTO,
+            bytes32(uint256(0x99)),
+            uint64(block.timestamp + 30 minutes),
+            uint64(block.timestamp + 1 hours),
+            "q",
+            ONE_USDC,
+            true
+        );
+    }
+
+    function test_dailyCap_isPerWallet_aliceCapDoesNotBlockBob() public {
+        // Alice maxes out.
+        for (uint256 i = 0; i < 10; i++) {
+            _createCryptoAs(alice, i);
+        }
+        // Bob — same UTC day, different wallet — can still create.
+        uint256 bobId = _createCryptoAs(bob, 100);
+        MakoMarketsV4.Market memory bm = mako.getMarket(bobId);
+        assertEq(bm.creator, bob);
+
+        (uint256 aliceCount, ) = mako.creatorCreatesToday(alice);
+        (uint256 bobCount, ) = mako.creatorCreatesToday(bob);
+        assertEq(aliceCount, 10);
+        assertEq(bobCount, 1);
+    }
+
+    function test_dailyCap_resetsAtUtcMidnightRollover() public {
+        // Alice maxes out today.
+        for (uint256 i = 0; i < 10; i++) {
+            _createCryptoAs(alice, i);
+        }
+
+        // Warp into the NEXT UTC day. block.timestamp / SECONDS_PER_DAY
+        // is what the contract keys on; bump it forward enough to land
+        // in tomorrow's bucket. +1 day + 1 second guarantees we crossed
+        // the boundary regardless of the test's starting offset.
+        vm.warp(block.timestamp + 1 days + 1);
+
+        // Now alice can create again. Counter for the NEW day starts at 0.
+        (uint256 countBefore, uint256 remainingBefore) = mako.creatorCreatesToday(alice);
+        assertEq(countBefore, 0);
+        assertEq(remainingBefore, 10);
+
+        uint256 id = _createCryptoAs(alice, 999);
+        MakoMarketsV4.Market memory m = mako.getMarket(id);
+        assertEq(m.creator, alice);
+        (uint256 countAfter, ) = mako.creatorCreatesToday(alice);
+        assertEq(countAfter, 1);
+    }
+
+    function test_dailyCap_makoExempt_adminCanExceedTen() public {
+        // Admin (test contract) maxes out non-MAKO.
+        for (uint256 i = 0; i < 10; i++) {
+            // Use unique oracleRef each iteration. CRYPTO type via the
+            // test-contract caller (it's the deployer == owner here,
+            // but the cap check only applies on the non-MAKO branch
+            // anyway).
+            usdc.mint(address(this), 2 * ONE_USDC);
+            mako.createMarket(
+                MakoMarketsV4.MarketType.CRYPTO,
+                bytes32(uint256(0x2000000 + i)),
+                uint64(block.timestamp + 30 minutes),
+                uint64(block.timestamp + 1 hours),
+                "q",
+                ONE_USDC,
+                true
+            );
+        }
+        (uint256 count, uint256 remaining) = mako.creatorCreatesToday(address(this));
+        assertEq(count, 10);
+        assertEq(remaining, 0);
+
+        // 11th non-MAKO reverts on the cap.
+        usdc.mint(address(this), 2 * ONE_USDC);
+        vm.expectRevert(MakoMarketsV4.CreatorDailyCapExceeded.selector);
+        mako.createMarket(
+            MakoMarketsV4.MarketType.CRYPTO,
+            bytes32(uint256(0xdead)),
+            uint64(block.timestamp + 30 minutes),
+            uint64(block.timestamp + 1 hours),
+            "q",
+            ONE_USDC,
+            true
+        );
+
+        // BUT MAKO creation succeeds — admin path bypasses the cap.
+        // Create three MAKO markets back-to-back to prove there's no
+        // hidden parallel counter for MAKO either.
+        for (uint256 j = 0; j < 3; j++) {
+            uint256 makoId = mako.createMarket(
+                MakoMarketsV4.MarketType.MAKO,
+                bytes32(uint256(0x3000000 + j)),
+                uint64(block.timestamp + 1 hours),
+                uint64(block.timestamp + 2 hours),
+                "mako q",
+                0,
+                true
+            );
+            MakoMarketsV4.Market memory m = mako.getMarket(makoId);
+            assertEq(uint8(m.mType), uint8(MakoMarketsV4.MarketType.MAKO));
+        }
+
+        // The non-MAKO counter for the admin is unchanged by the MAKO
+        // creates (MAKO never increments).
+        (uint256 countAfterMako, ) = mako.creatorCreatesToday(address(this));
+        assertEq(countAfterMako, 10);
+    }
+
+    function test_dailyCap_revertDoesNotBurnSlot() public {
+        // Alice has 9 valid creates. The 10th attempt has a BAD argument
+        // (closeTime in the past) and reverts BEFORE the cap increment.
+        // After that revert her counter must still be 9 — a doomed call
+        // cannot burn a daily slot.
+        for (uint256 i = 0; i < 9; i++) {
+            _createCryptoAs(alice, i);
+        }
+        (uint256 countBefore, ) = mako.creatorCreatesToday(alice);
+        assertEq(countBefore, 9);
+
+        usdc.mint(alice, 2 * ONE_USDC);
+        vm.prank(alice);
+        vm.expectRevert(MakoMarketsV4.BadCloseTime.selector);
+        mako.createMarket(
+            MakoMarketsV4.MarketType.CRYPTO,
+            bytes32(uint256(0x9999)),
+            uint64(block.timestamp + 30 minutes),
+            uint64(block.timestamp - 1), // closeTime in the past → BadCloseTime
+            "q",
+            ONE_USDC,
+            true
+        );
+
+        // Counter still 9; alice can still do one more successful create.
+        (uint256 countAfterRevert, ) = mako.creatorCreatesToday(alice);
+        assertEq(countAfterRevert, 9);
+
+        uint256 id = _createCryptoAs(alice, 10);
+        MakoMarketsV4.Market memory m = mako.getMarket(id);
+        assertEq(m.creator, alice);
+        (uint256 countAt10, ) = mako.creatorCreatesToday(alice);
+        assertEq(countAt10, 10);
+    }
+
+    function test_creatorCreatesToday_view_reflectsCountAndRemaining() public {
+        // 0 / 10 at the start.
+        (uint256 c0, uint256 r0) = mako.creatorCreatesToday(alice);
+        assertEq(c0, 0);
+        assertEq(r0, 10);
+
+        _createCryptoAs(alice, 1);
+        (uint256 c1, uint256 r1) = mako.creatorCreatesToday(alice);
+        assertEq(c1, 1);
+        assertEq(r1, 9);
+
+        // Walk to 10 / 0.
+        for (uint256 i = 2; i < 11; i++) {
+            _createCryptoAs(alice, i);
+        }
+        (uint256 c10, uint256 r10) = mako.creatorCreatesToday(alice);
+        assertEq(c10, 10);
+        assertEq(r10, 0);
+    }
+
+    // Codex r1 MINOR 1: exact UTC-midnight equality. block.timestamp /
+    // SECONDS_PER_DAY puts ts == N*86400-1 in day N-1 (still capped) and
+    // ts == N*86400 in day N (fresh counter). Pin both ends of the
+    // boundary rather than just "+1 day + 1 second crossed it."
+    function test_dailyCap_utcMidnightBoundaryEquality() public {
+        uint256 baseDay = (block.timestamp / 86400) + 10;
+        uint256 dayEnd = baseDay * 86400 - 1;
+        vm.warp(dayEnd);
+
+        for (uint256 i = 0; i < 10; i++) {
+            _createCryptoAs(alice, i);
+        }
+        (uint256 endCount, ) = mako.creatorCreatesToday(alice);
+        assertEq(endCount, 10);
+
+        // 11th at the same second still reverts. dayEnd is the last
+        // second of the "ending" bucket.
+        usdc.mint(alice, 2 * ONE_USDC);
+        vm.prank(alice);
+        vm.expectRevert(MakoMarketsV4.CreatorDailyCapExceeded.selector);
+        mako.createMarket(
+            MakoMarketsV4.MarketType.CRYPTO,
+            bytes32(uint256(0xb04ed0ad)),
+            uint64(block.timestamp + 30 minutes),
+            uint64(block.timestamp + 1 hours),
+            "q",
+            ONE_USDC,
+            true
+        );
+
+        // Step forward exactly one second — block.timestamp == N*86400,
+        // integer division puts us in the new day. Counter resets.
+        vm.warp(dayEnd + 1);
+        (uint256 newDayCount, uint256 newDayRemaining) =
+            mako.creatorCreatesToday(alice);
+        assertEq(newDayCount, 0);
+        assertEq(newDayRemaining, 10);
+
+        uint256 id = _createCryptoAs(alice, 999);
+        MakoMarketsV4.Market memory m = mako.getMarket(id);
+        assertEq(m.creator, alice);
+        (uint256 afterFresh, ) = mako.creatorCreatesToday(alice);
+        assertEq(afterFresh, 1);
+    }
+
+    // Codex r1 MINOR 2: post-increment revert rollback. The counter is
+    // incremented before safeTransferFrom; a fee-on-transfer token causes
+    // TransferAmountMismatch to revert later in the same call. EVM
+    // semantics roll back every state write, including the counter.
+    // Pin it so a future refactor that moves the increment past the
+    // transfer (and thus stops rolling back on transfer-revert) is loud.
+    function test_dailyCap_revertOnTransferRollsBackCounter() public {
+        FeeOnTransferUSDC fot = new FeeOnTransferUSDC();
+        MakoMarketsV4 fotMako = new MakoMarketsV4(treasury, address(fot));
+
+        fot.mint(alice, 100 * ONE_USDC);
+        vm.prank(alice);
+        fot.approve(address(fotMako), type(uint256).max);
+
+        (uint256 before, ) = fotMako.creatorCreatesToday(alice);
+        assertEq(before, 0);
+
+        vm.prank(alice);
+        vm.expectRevert(MakoMarketsV4.TransferAmountMismatch.selector);
+        fotMako.createMarket(
+            MakoMarketsV4.MarketType.CRYPTO,
+            bytes32("rollback"),
+            uint64(block.timestamp + 30 minutes),
+            uint64(block.timestamp + 1 hours),
+            "q",
+            ONE_USDC,
+            true
+        );
+
+        (uint256 afterRevert, uint256 remainingAfter) =
+            fotMako.creatorCreatesToday(alice);
+        assertEq(afterRevert, 0);
+        assertEq(remainingAfter, 10);
     }
 }
