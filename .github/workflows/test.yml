@@ -52,5 +52,8 @@ jobs:
       - name: Reference implementation agrees with the corpus
         run: node script/rule-reference.mjs
 
-      - name: Every SPEC 5.2 clause is load-bearing
+      - name: Every SPEC 5.2 clause is load-bearing (reference implementation)
         run: node script/mutate-reference.mjs
+
+      - name: Every SPEC 5.2 clause is load-bearing (shipping library)
+        run: node script/mutate-solidity.mjs
