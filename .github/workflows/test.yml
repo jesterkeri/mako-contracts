@@ -22,6 +22,14 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
+      # Pinned via .nvmrc so the rule-corpus gates below are not run on whatever the runner
+      # image happens to ship. These scripts are deliberately dependency-free (Node built-ins
+      # only), so there is no install step and no registry to be unavailable.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
@@ -36,3 +44,13 @@ jobs:
 
       - name: Run Forge tests
         run: forge test -vvv
+
+      # PROOF_STANDARD.md Version 3 gates. All offline: no network, no credentials, no chain.
+      - name: Rule corpus matches its generator
+        run: node script/build-cases.mjs --check
+
+      - name: Reference implementation agrees with the corpus
+        run: node script/rule-reference.mjs
+
+      - name: Every SPEC 5.2 clause is load-bearing
+        run: node script/mutate-reference.mjs
