@@ -337,6 +337,19 @@ function groundTruth() {
   return { checked: true, identical, source: 'archive-probe-2026-09-23T10-05-57-924Z', reEncodedSha256: sha256(Buffer.from(mine.slice(2), 'hex')) };
 }
 
+const built = cases.map(build);
+
+// Flat parallel arrays, because forge-std's JSON reader takes one value per path and rejects
+// wildcards like `.cases[*].id`. Generated, never hand-edited, and `--check` compares the whole
+// file against this generator, so the index cannot drift from the rows it indexes.
+const index = {
+  ids: built.map((c) => c.id),
+  sources: built.map((c) => c.source),
+  verdicts: built.map((c) => c.expect.verdict),
+  requiredTestNames: built.filter((c) => c.requiredTestName).map((c) => c.requiredTestName),
+  mustNotPanicIds: built.filter((c) => c.expect.mustNotPanic).map((c) => c.id),
+};
+
 const corpus = {
   _version: 1,
   _generatedBy: 'script/build-cases.mjs',
@@ -344,7 +357,8 @@ const corpus = {
   _encoderGroundTruth: groundTruth(),
   _constants: { FEED_ID, MAX_SPREAD_BPS: Number(MAX_SPREAD_BPS), INT192_MAX: INT192_MAX.toString(), INT192_MIN: INT192_MIN.toString() },
   _impossibleCases: impossibleCases,
-  cases: cases.map(build),
+  _index: index,
+  cases: built,
 };
 
 const text = JSON.stringify(corpus, null, 2) + '\n';
