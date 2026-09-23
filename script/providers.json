@@ -1,0 +1,71 @@
+{
+  "$comment": [
+    "The approved-provider record for T0.1's network scripts. PROOF_STANDARD.md Version 3 §11",
+    "requires a two-provider claim to use providers with DIFFERENT OPERATORS, and requires that",
+    "independence to be checked against a machine-readable record rather than asserted in prose.",
+    "This is that record.",
+    "",
+    "URLs are NOT stored here. A provider's URL is supplied by the environment variable named in",
+    "'urlEnv' so that a key-bearing endpoint is never committed. Each run records the sanitized",
+    "canonical host it actually resolved to and refuses to proceed if that host is not the one this",
+    "record approves for that provider id.",
+    "",
+    "'operator' must be a real, checkable operator identity. 'unknown' is honest and is exactly why",
+    "a pair containing it yields proofLevel 'one-domain' rather than 'two-distinct-operators'."
+  ],
+  "providers": [
+    {
+      "id": "monad-public",
+      "host": "testnet-rpc.monad.xyz",
+      "urlEnv": "MAKO_RPC_A",
+      "operator": "unknown",
+      "operatorEvidence": null,
+      "credentialed": false,
+      "archiveSupport": "measured: eth_call served at 43.6 days (8/8), refused at 50.8 days (0/8), 2026-09-22",
+      "finalizedTag": "supported, lag 3 to 4 blocks / 1 second measured 2026-09-22",
+      "failureDomain": "unknown",
+      "notes": "The default public endpoint. Deterministic in every measurement so far, but its operator is not established, so it cannot be half of a distinct-operator pair."
+    },
+    {
+      "id": "monadinfra",
+      "host": "rpc-testnet.monadinfra.com",
+      "urlEnv": "MAKO_RPC_B",
+      "operator": "unknown",
+      "operatorEvidence": null,
+      "credentialed": false,
+      "archiveSupport": "INTERMITTENT: measured 5/8, 6/8 and 1/8 at three historical blocks, 2026-09-22. Load balancer over backends with unequal pruning.",
+      "finalizedTag": "supported, lag 3 to 4 blocks / 1 second measured 2026-09-22",
+      "failureDomain": "unknown",
+      "notes": "Agrees byte for byte with monad-public when it answers, including on the mandatory fixture at block 62922075 on 2026-09-23. Intermittent service means a not-served answer here is ARCHIVE_UNAVAILABLE, never a verification failure."
+    },
+    {
+      "id": "alchemy",
+      "host": "monad-testnet.g.alchemy.com",
+      "urlEnv": "MAKO_RPC_ALCHEMY",
+      "operator": "Alchemy Insights, Inc.",
+      "operatorEvidence": "a named company with its own account, quota and billing relationship; the only provider in this project with an established distinct operator",
+      "credentialed": true,
+      "archiveSupport": "UNMEASURED. This is the open prerequisite for T0.1's two-provider proof.",
+      "finalizedTag": "unmeasured",
+      "failureDomain": "distinct from the public endpoints: separate company, separate account, separate quota",
+      "notes": "Candidate for the second operator. Blocked as of 2026-09-21 by every call returning 429 'monthly capacity exceeded' while the dashboard showed zero usage; Alchemy ticket #23824 is open. Confirm the 429 has cleared before relying on it."
+    },
+    {
+      "id": "drpc",
+      "host": "monad-testnet.drpc.org",
+      "urlEnv": "MAKO_RPC_DRPC",
+      "operator": "unknown",
+      "operatorEvidence": null,
+      "credentialed": false,
+      "archiveSupport": "UNUSABLE: eth_getBlockByNumber unavailable at historical blocks, and eth_call refused with 'user-specified gas exceeds provider limit', measured 2026-09-22 and again 2026-09-23",
+      "finalizedTag": "unmeasured",
+      "failureDomain": "unknown",
+      "notes": "Recorded so it is not retried by a later reader. Free tier cannot serve this workload."
+    }
+  ],
+  "pairPolicy": {
+    "twoDistinctOperators": "Both providers must have a non-null 'operator' that is not 'unknown', and the two operators must differ. Only then may evidence carry proofLevel 'two-distinct-operators'.",
+    "oneDomain": "Any other pair. Evidence carries proofLevel 'one-domain', which PROOF_STANDARD.md Version 3 §1b states does not satisfy that section. A run invoked as proof exits non-zero with NOT_INDEPENDENT.",
+    "hostCheck": "The resolved host of each provider's URL must equal the 'host' recorded here for that id, or the run fails. This keeps a key out of the repository while making a swapped endpoint visible to a reviewer."
+  }
+}

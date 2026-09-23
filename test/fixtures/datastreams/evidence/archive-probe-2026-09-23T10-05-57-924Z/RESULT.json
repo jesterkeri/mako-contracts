@@ -1,0 +1,138 @@
+{
+  "checkedAt": "2026-09-23T10:06:00.165Z",
+  "proofType": "B1",
+  "mode": "diagnostic",
+  "status": "VERIFIED_MATCH",
+  "proofLevel": "one-domain",
+  "chainId": 10143,
+  "verifier": "0x72790f9eb82db492a7ddb6d2af22a270dcc3db64",
+  "pinned": {
+    "codeHashKeccak256": "0x4bd86e898b2952f6f0d20fee037accf52490dbdd9279345cd4b0a7161b5c022b",
+    "typeAndVersion": "VerifierProxy 2.0.0",
+    "feedId": "0x00037da06d56d083fe599397a4769a042d63aa73dc4ef57709d31e9971a5b439",
+    "configDigest": "0x00090d9e8d96765a0c49e03a6ae05c82e8f8de70cf179baa632f18313e54bd69"
+  },
+  "target": {
+    "label": "mandatory widened-window fixture, BTC/USD 2026-09-16 03:26:00 UTC",
+    "block": 62922075,
+    "blockHash": "0x73f54743b7db644c8f010e74f422107337b586b59fed5a91916f98b384a722d6",
+    "blockTimestamp": 1789529160,
+    "observationsTimestamp": 1789529160,
+    "validFromTimestamp": 1789529157,
+    "reportPath": "test/fixtures/datastreams/pending/btcusd-1789529160.json"
+  },
+  "calldataSha256": "c462c41b4487f12cf74dbf5cec66ae7108e1864f429baeb5eba75ab58adcfb68",
+  "providers": {
+    "monad-public": {
+      "provider": {
+        "id": "monad-public",
+        "url": "https://testnet-rpc.monad.xyz/",
+        "host": "testnet-rpc.monad.xyz",
+        "operator": "unknown",
+        "credentialed": false,
+        "endpointConfigSha256": "c39821a2ba4d180a7a5400b594bb138c99e0ee5a3281498235aa1bc7ac837ca6"
+      },
+      "identity": {
+        "served": true,
+        "chainId": 10143,
+        "codeBytes": 7009,
+        "codeSha256": "246be742ffcc522f72309f1f42c77817af4d6f823969ce9e5763f2a9327ca231",
+        "feeManager": "0x0000000000000000000000000000000000000000",
+        "accessController": "0x0000000000000000000000000000000000000000",
+        "typeAndVersion": "VerifierProxy 2.0.0",
+        "block": {
+          "number": 62922075,
+          "hash": "0x73f54743b7db644c8f010e74f422107337b586b59fed5a91916f98b384a722d6",
+          "timestamp": 1789529160
+        }
+      },
+      "identityOk": true,
+      "status": "SERVED",
+      "attempts": [
+        {
+          "attempt": 1,
+          "httpStatus": 200,
+          "error": null,
+          "served": true
+        }
+      ],
+      "requestHash": "48bff2edf9d3d6c1b3b66abfca682e1b056cbafb8418b8bbf5fffbd1293b13e4",
+      "responseHash": "83971e3fc49b89473139b39feccbf3f743e7b981f269e1c45813200ff40bbfc5",
+      "rawResult": "0x0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000012000037da06d56d083fe599397a4769a042d63aa73dc4ef57709d31e9971a5b439000000000000000000000000000000000000000000000000000000006aaa0c45000000000000000000000000000000000000000000000000000000006aaa0c48000000000000000000000000000000000000000000000000000078e2bb88e66700000000000000000000000000000000000000000000000000686566f7271e3f000000000000000000000000000000000000000000000000000000006ad19948000000000000000000000000000000000000000000001014a670561d4a24100000000000000000000000000000000000000000000000101474943092ad698000000000000000000000000000000000000000000000001014efe0fce545224800",
+      "decoded": {
+        "ok": true,
+        "rawBytes": 352,
+        "envelopeOffset": 32,
+        "envelopeLength": 288,
+        "payloadBytes": 288,
+        "payloadSha256": "be8b5132423d7e7926f2bdc50917d000a1b0dbde49db8d01a78be57d94b410ef",
+        "schemaPrefix": "0x0003",
+        "feedId": "0x00037da06d56d083fe599397a4769a042d63aa73dc4ef57709d31e9971a5b439",
+        "validFromTimestamp": 1789529157,
+        "observationsTimestamp": 1789529160,
+        "nativeFee": "132915204253287",
+        "linkFee": "29384890485513791",
+        "expiresAt": 1792121160,
+        "price": "75938791787880000000000",
+        "bid": "75935199000000000000000",
+        "ask": "75944083700820000000000"
+      }
+    },
+    "monadinfra": {
+      "provider": {
+        "id": "monadinfra",
+        "url": "https://rpc-testnet.monadinfra.com",
+        "host": "rpc-testnet.monadinfra.com",
+        "operator": "unknown",
+        "credentialed": false,
+        "endpointConfigSha256": "2b2c3eed9c839f47feaccb80e2e9ee765a1f0cc4fcf115fadeea0de15ebf9f4b"
+      },
+      "identity": {
+        "served": true,
+        "chainId": 10143,
+        "codeBytes": 7009,
+        "codeSha256": "246be742ffcc522f72309f1f42c77817af4d6f823969ce9e5763f2a9327ca231",
+        "feeManager": "0x0000000000000000000000000000000000000000",
+        "accessController": "0x0000000000000000000000000000000000000000",
+        "typeAndVersion": "VerifierProxy 2.0.0",
+        "block": {
+          "number": 62922075,
+          "hash": "0x73f54743b7db644c8f010e74f422107337b586b59fed5a91916f98b384a722d6",
+          "timestamp": 1789529160
+        }
+      },
+      "identityOk": true,
+      "status": "SERVED",
+      "attempts": [
+        {
+          "attempt": 1,
+          "httpStatus": 200,
+          "error": null,
+          "served": true
+        }
+      ],
+      "requestHash": "48bff2edf9d3d6c1b3b66abfca682e1b056cbafb8418b8bbf5fffbd1293b13e4",
+      "responseHash": "83971e3fc49b89473139b39feccbf3f743e7b981f269e1c45813200ff40bbfc5",
+      "rawResult": "0x0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000012000037da06d56d083fe599397a4769a042d63aa73dc4ef57709d31e9971a5b439000000000000000000000000000000000000000000000000000000006aaa0c45000000000000000000000000000000000000000000000000000000006aaa0c48000000000000000000000000000000000000000000000000000078e2bb88e66700000000000000000000000000000000000000000000000000686566f7271e3f000000000000000000000000000000000000000000000000000000006ad19948000000000000000000000000000000000000000000001014a670561d4a24100000000000000000000000000000000000000000000000101474943092ad698000000000000000000000000000000000000000000000001014efe0fce545224800",
+      "decoded": {
+        "ok": true,
+        "rawBytes": 352,
+        "envelopeOffset": 32,
+        "envelopeLength": 288,
+        "payloadBytes": 288,
+        "payloadSha256": "be8b5132423d7e7926f2bdc50917d000a1b0dbde49db8d01a78be57d94b410ef",
+        "schemaPrefix": "0x0003",
+        "feedId": "0x00037da06d56d083fe599397a4769a042d63aa73dc4ef57709d31e9971a5b439",
+        "validFromTimestamp": 1789529157,
+        "observationsTimestamp": 1789529160,
+        "nativeFee": "132915204253287",
+        "linkFee": "29384890485513791",
+        "expiresAt": 1792121160,
+        "price": "75938791787880000000000",
+        "bid": "75935199000000000000000",
+        "ask": "75944083700820000000000"
+      }
+    }
+  },
+  "bytesIdentical": true
+}
