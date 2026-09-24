@@ -12,7 +12,9 @@ import {
     RevertingUSDC,
     FeeOnTransferUSDC,
     MalformedReturnUSDC,
-    OvershootUSDC
+    OvershootUSDC,
+    ShortTransferUSDC,
+    ReentrantUSDC
 } from "./mocks/TokenMocks.sol";
 
 /// @notice Slice 1: the round lifecycle and permissionless settlement. No money anywhere.
@@ -563,6 +565,17 @@ contract MakoRoundsV1Test is Test {
         fresh.schedule(uint64(block.timestamp) + 3600 - (uint64(block.timestamp) + 3600) % 60 + 60);
 
         assertEq(fresh.activeRoundCount(), 10, "slots are still held");
+
+        // SLICE 3: and anyone at all can now unjam it. `finalizeRefund` is permissionless, and it is
+        // the ONLY thing that frees a slot from a round nobody settled, so the eleventh creator does
+        // not have to wait for the ten who walked away.
+        vm.prank(many[10]);
+        fresh.finalizeRefund(1);
+        assertEq(fresh.activeRoundCount(), 9, "one refund frees one slot");
+
+        vm.prank(many[10]);
+        fresh.schedule(uint64(block.timestamp) + 3600 - (uint64(block.timestamp) + 3600) % 60 + 60);
+        assertEq(fresh.activeRoundCount(), 10);
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -798,25 +811,444 @@ contract MakoRoundsV1Test is Test {
     }
 
     // ---------------------------------------------------------------------------------------------
-    // slice boundary
+    // slice 3: helpers
     // ---------------------------------------------------------------------------------------------
 
-    /// @notice Money can come IN but has no way OUT until slice 3.
-    /// @dev Asserted so the boundary is a test rather than a claim in a comment, and so the
-    /// consequence is unmissable: deploying this as it stands would strand every entrant's stake.
-    /// Slice 3 is not optional polish.
-    function test_ValueCanEnterButNotLeaveUntilSliceThree() public {
+    /// @dev Settles the setUp round with alice UP 10 and bob DOWN 30, and UP winning.
+    function _settleUpWins() internal {
+        _armHappyPath(100e18, 101e18);
+        rounds.settle(roundId, _anchorBytes(), _closeBytes());
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // slice 3: finalizeRefund
+    // ---------------------------------------------------------------------------------------------
+
+    /// @notice N3: an empty side refunds as OneSided from entryCloseTime, whatever the price.
+    /// Asserted at the boundary +/- 1.
+    function test_OneSidedRefundsWithoutPrice() public {
         vm.prank(alice);
         rounds.enter(roundId, MakoRoundsV1.Side.Up, 10_000_000);
-        assertEq(usdc.balanceOf(address(rounds)), 10_000_000);
 
-        // No claim, no refund payout, no treasury withdrawal exists yet. The only selectors that
-        // move USDC are the ones slice 3 adds, so the balance cannot fall.
-        _arm(_anchorBytes(), uint32(startTime), 100e18);
-        vm.warp(closeTime + 1);
-        assertEq(usdc.balanceOf(address(rounds)), 10_000_000, "nothing can leave");
+        uint64 entryClose = startTime - 60;
+        vm.warp(entryClose - 1);
+        vm.expectRevert(MakoRoundsV1.NotRefundableYet.selector);
+        rounds.finalizeRefund(roundId);
 
-        // Native value was never accepted either: there is no payable function at all.
-        assertEq(address(rounds).balance, 0);
+        vm.warp(entryClose);
+        rounds.finalizeRefund(roundId);
+
+        MakoRoundsV1.Round memory r = rounds.roundOf(roundId);
+        assertEq(uint256(r.refundReason), uint256(MakoRoundsV1.RefundReason.OneSided));
+        assertEq(uint256(rounds.phaseOf(roundId)), uint256(MakoRoundsV1.Phase.Refunded));
     }
+
+    /// @notice A two-sided round can NOT refund as OneSided, even after entries close. That is the
+    /// other half of settle and finalizeRefund being mutually exclusive by condition.
+    function test_TwoSidedRoundCannotRefundAsOneSided() public {
+        _twoSided();
+        vm.warp(closeTime);
+        vm.expectRevert(MakoRoundsV1.NotRefundableYet.selector);
+        rounds.finalizeRefund(roundId);
+    }
+
+    /// @notice N5: funds are never stuck past submitDeadline. NoPrice from submitDeadline, +/- 1.
+    function test_FinalizeRefundAfterDeadline() public {
+        _twoSided();
+
+        vm.warp(submitDeadline - 1);
+        vm.expectRevert(MakoRoundsV1.NotRefundableYet.selector);
+        rounds.finalizeRefund(roundId);
+
+        vm.warp(submitDeadline);
+        rounds.finalizeRefund(roundId);
+        assertEq(uint256(rounds.roundOf(roundId).refundReason), uint256(MakoRoundsV1.RefundReason.NoPrice));
+
+        // And the money comes back.
+        uint256 before = usdc.balanceOf(alice);
+        vm.prank(alice);
+        rounds.claim(roundId);
+        assertEq(usdc.balanceOf(alice) - before, 10_000_000, "exactly the stake, no fee");
+    }
+
+    function test_FinalizeRefundOnATerminalRoundReverts() public {
+        _settleUpWins();
+        vm.warp(submitDeadline);
+        vm.expectRevert(MakoRoundsV1.RoundAlreadyTerminal.selector);
+        rounds.finalizeRefund(roundId);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // slice 3: claim
+    // ---------------------------------------------------------------------------------------------
+
+    function test_WinnerIsPaidTheirShareOfDistributable() public {
+        _settleUpWins();
+        MakoRoundsV1.Round memory r = rounds.roundOf(roundId);
+
+        uint256 before = usdc.balanceOf(alice);
+        vm.prank(alice);
+        rounds.claim(roundId);
+
+        // alice is the only UP entrant, so her share is the whole of distributable.
+        assertEq(usdc.balanceOf(alice) - before, r.distributable);
+    }
+
+    /// @notice A loser is owed nothing, and the call reverts rather than paying zero. SPEC §7.
+    function test_LoserClaimReverts() public {
+        _settleUpWins();
+        vm.prank(bob);
+        vm.expectRevert(MakoRoundsV1.NothingOwed.selector);
+        rounds.claim(roundId);
+    }
+
+    /// @notice N19: nothing is paid twice.
+    function test_NoDoubleClaim() public {
+        _settleUpWins();
+        vm.prank(alice);
+        rounds.claim(roundId);
+
+        vm.prank(alice);
+        vm.expectRevert(MakoRoundsV1.NothingOwed.selector);
+        rounds.claim(roundId);
+    }
+
+    function test_ClaimBeforeTerminalReverts() public {
+        _twoSided();
+        vm.warp(closeTime);
+        vm.prank(alice);
+        vm.expectRevert(MakoRoundsV1.RoundNotTerminal.selector);
+        rounds.claim(roundId);
+    }
+
+    /// @notice N9: equality refunds as Tie, and the refund is exact.
+    function test_TieRefunds() public {
+        _armHappyPath(100e18, 100e18);
+        rounds.settle(roundId, _anchorBytes(), _closeBytes());
+
+        uint256 a = usdc.balanceOf(alice);
+        uint256 b = usdc.balanceOf(bob);
+        vm.prank(alice);
+        rounds.claim(roundId);
+        vm.prank(bob);
+        rounds.claim(roundId);
+
+        assertEq(usdc.balanceOf(alice) - a, 10_000_000);
+        assertEq(usdc.balanceOf(bob) - b, 30_000_000);
+        assertEq(usdc.balanceOf(address(rounds)), 0, "a refunded round leaves nothing behind");
+        assertEq(rounds.treasuryBalance(), 0, "and charges nothing");
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // slice 3: fees
+    // ---------------------------------------------------------------------------------------------
+
+    /// @notice N19: fees are taken only on SETTLED.
+    function test_FeesOnlyOnSettle() public {
+        _armHappyPath(100e18, 100e18); // tie
+        rounds.settle(roundId, _anchorBytes(), _closeBytes());
+        assertEq(rounds.treasuryBalance(), 0, "no protocol fee on a refund");
+
+        vm.prank(creator);
+        vm.expectRevert(MakoRoundsV1.NothingOwed.selector);
+        rounds.claim(roundId); // no creator fee on a refund either
+    }
+
+    /// @notice N19: on a refunded round the creator is repaid their stake and NOTHING is recorded as
+    /// a creator fee, because no fee exists.
+    /// @dev FOUND BY THE MUTATION SWEEP. Dropping `r.status == Status.Settled` from the creator-fee
+    /// condition survived every other test: a refunded round's `creatorFee` is always zero, so the
+    /// mutant pays nothing extra and every balance stays right. But it still sets the creator-fee
+    /// flag, so `creatorFeeClaimed` would tell clients and the watchdog a fee was claimed on a round
+    /// that never had one. Balances were never the only thing that had to be true.
+    function test_RefundRecordsNoCreatorFee() public {
+        vm.warp(BASE);
+        vm.prank(creator);
+        rounds.enter(roundId, MakoRoundsV1.Side.Up, 10_000_000);
+        vm.prank(bob);
+        rounds.enter(roundId, MakoRoundsV1.Side.Down, 30_000_000);
+        _arm(_anchorBytes(), uint32(startTime), 100e18);
+        _arm(_closeBytes(), uint32(closeTime), 100e18); // tie
+        vm.warp(closeTime);
+        rounds.settle(roundId, _anchorBytes(), _closeBytes());
+
+        uint256 before = usdc.balanceOf(creator);
+        vm.prank(creator);
+        rounds.claim(roundId);
+
+        assertEq(usdc.balanceOf(creator) - before, 10_000_000, "exactly the stake");
+        assertFalse(rounds.creatorFeeClaimed(roundId), "no fee existed, so none may be recorded as claimed");
+    }
+
+    /// @notice N19: a creator with NO stake can still claim their fee, once.
+    function test_ZeroStakeCreatorClaimsFee() public {
+        _settleUpWins();
+        uint256 fee = rounds.roundOf(roundId).creatorFee;
+        assertGt(fee, 0);
+        assertEq(rounds.stakeOf(roundId, creator).amount, 0, "the creator never entered");
+
+        uint256 before = usdc.balanceOf(creator);
+        vm.prank(creator);
+        rounds.claim(roundId);
+        assertEq(usdc.balanceOf(creator) - before, fee);
+
+        vm.prank(creator);
+        vm.expectRevert(MakoRoundsV1.NothingOwed.selector);
+        rounds.claim(roundId);
+    }
+
+    /// @notice A creator who also backed the winning side gets payout AND fee, in one call, once.
+    function test_CreatorWhoWonGetsPayoutAndFeeInOneCall() public {
+        vm.warp(BASE);
+        vm.prank(creator);
+        rounds.enter(roundId, MakoRoundsV1.Side.Up, 10_000_000);
+        vm.prank(bob);
+        rounds.enter(roundId, MakoRoundsV1.Side.Down, 30_000_000);
+        _arm(_anchorBytes(), uint32(startTime), 100e18);
+        _arm(_closeBytes(), uint32(closeTime), 101e18);
+        vm.warp(closeTime);
+        rounds.settle(roundId, _anchorBytes(), _closeBytes());
+
+        MakoRoundsV1.Round memory r = rounds.roundOf(roundId);
+        uint256 before = usdc.balanceOf(creator);
+        vm.prank(creator);
+        rounds.claim(roundId);
+        assertEq(usdc.balanceOf(creator) - before, r.distributable + r.creatorFee);
+        assertTrue(rounds.stakeClaimed(roundId, creator) && rounds.creatorFeeClaimed(roundId));
+    }
+
+    /// @notice N19: protocol fees and remainders leave only to TREASURY, only when TREASURY asks.
+    function test_TreasuryOnly() public {
+        _settleUpWins();
+        uint256 owed = rounds.treasuryBalance();
+        assertGt(owed, 0);
+
+        vm.prank(alice);
+        vm.expectRevert(MakoRoundsV1.NotTreasury.selector);
+        rounds.withdrawTreasury();
+
+        vm.prank(TREASURY);
+        rounds.withdrawTreasury();
+        assertEq(usdc.balanceOf(TREASURY), owed);
+        assertEq(rounds.treasuryBalance(), 0);
+
+        vm.prank(TREASURY);
+        vm.expectRevert(MakoRoundsV1.NothingOwed.selector);
+        rounds.withdrawTreasury();
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // slice 3: N17, conservation, the property the whole contract exists to keep
+    // ---------------------------------------------------------------------------------------------
+
+    /// @notice Once the last winner claims, sum(payouts) + protocolFee + creatorFee + remainder is
+    /// the total EXACTLY, the remainder is in the treasury, and the contract is left holding nothing.
+    /// @dev Fuzzed over several winners with arbitrary stakes, because the remainder only exists
+    /// when per-winner flooring truncates, which a single round number never does.
+    function testFuzz_ConservationSettled(uint64 s1, uint64 s2, uint64 s3, uint64 loserStake) public {
+        address[3] memory winners = [address(0xE1), address(0xE2), address(0xE3)];
+        uint256[3] memory stakes =
+            [uint256(s1) % 1e12 + 100_000, uint256(s2) % 1e12 + 100_000, uint256(s3) % 1e12 + 100_000];
+        uint256 lose = uint256(loserStake) % 1e12 + 100_000;
+
+        vm.warp(BASE);
+        for (uint256 i = 0; i < 3; i++) {
+            usdc.mint(winners[i], stakes[i]);
+            vm.startPrank(winners[i]);
+            usdc.approve(address(rounds), type(uint256).max);
+            rounds.enter(roundId, MakoRoundsV1.Side.Up, stakes[i]);
+            vm.stopPrank();
+        }
+        usdc.mint(bob, lose);
+        vm.prank(bob);
+        rounds.enter(roundId, MakoRoundsV1.Side.Down, lose);
+
+        uint256 total = stakes[0] + stakes[1] + stakes[2] + lose;
+        _arm(_anchorBytes(), uint32(startTime), 100e18);
+        _arm(_closeBytes(), uint32(closeTime), 101e18);
+        vm.warp(closeTime);
+        rounds.settle(roundId, _anchorBytes(), _closeBytes());
+        MakoRoundsV1.Round memory r = rounds.roundOf(roundId);
+
+        uint256 paid;
+        for (uint256 i = 0; i < 3; i++) {
+            uint256 before = usdc.balanceOf(winners[i]);
+            vm.prank(winners[i]);
+            rounds.claim(roundId);
+            paid += usdc.balanceOf(winners[i]) - before;
+            // before the last winner, never more than distributable has left
+            assertLe(paid, r.distributable, "claimed more than distributable");
+        }
+
+        vm.prank(creator);
+        rounds.claim(roundId);
+
+        uint256 remainder = r.distributable - paid;
+        assertEq(rounds.treasuryBalance(), r.protocolFee + remainder, "remainder swept to treasury");
+        assertEq(paid + r.protocolFee + r.creatorFee + remainder, total, "N17: conservation");
+
+        vm.prank(TREASURY);
+        rounds.withdrawTreasury();
+        assertEq(usdc.balanceOf(address(rounds)), 0, "nothing is left behind or created");
+    }
+
+    /// @notice The remainder waits for the last winner: a winner who has not claimed holds it back.
+    function test_RemainderWaitsForTheLastWinner() public {
+        vm.warp(BASE);
+        address w1 = address(0xE1);
+        address w2 = address(0xE2);
+        usdc.mint(w1, 10_000_001);
+        usdc.mint(w2, 10_000_002);
+        vm.prank(w1);
+        usdc.approve(address(rounds), type(uint256).max);
+        vm.prank(w2);
+        usdc.approve(address(rounds), type(uint256).max);
+        vm.prank(w1);
+        rounds.enter(roundId, MakoRoundsV1.Side.Up, 10_000_001);
+        vm.prank(w2);
+        rounds.enter(roundId, MakoRoundsV1.Side.Up, 10_000_002);
+        vm.prank(bob);
+        rounds.enter(roundId, MakoRoundsV1.Side.Down, 33_333_333);
+        _arm(_anchorBytes(), uint32(startTime), 100e18);
+        _arm(_closeBytes(), uint32(closeTime), 101e18);
+        vm.warp(closeTime);
+        rounds.settle(roundId, _anchorBytes(), _closeBytes());
+
+        uint256 afterSettle = rounds.treasuryBalance();
+        uint256 distributable = rounds.roundOf(roundId).distributable;
+
+        uint256 b1 = usdc.balanceOf(w1);
+        vm.prank(w1);
+        rounds.claim(roundId);
+        uint256 paid = usdc.balanceOf(w1) - b1;
+        assertEq(rounds.treasuryBalance(), afterSettle, "no sweep while a winner is still to claim");
+
+        uint256 b2 = usdc.balanceOf(w2);
+        vm.prank(w2);
+        rounds.claim(roundId);
+        paid += usdc.balanceOf(w2) - b2;
+
+        // These stakes are chosen so per-winner flooring truncates: without a non-zero remainder this
+        // test would pass while proving nothing about the sweep, which is what the first draft's
+        // `assertGe` did.
+        uint256 remainder = distributable - paid;
+        assertGt(remainder, 0, "the stakes must produce a real remainder or this test proves nothing");
+        assertEq(rounds.treasuryBalance(), afterSettle + remainder, "the last winner sweeps exactly the remainder");
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // slice 3: N8, reentrancy, one test per value-moving function
+    // ---------------------------------------------------------------------------------------------
+
+    function _roundsWithReentrant() internal returns (MakoRoundsV1 rr, ReentrantUSDC tok, uint256 id) {
+        tok = new ReentrantUSDC();
+        address[] memory cs = new address[](1);
+        cs[0] = creator;
+        rr = new MakoRoundsV1(TREASURY, address(tok), cs);
+        vm.prank(creator);
+        id = rr.schedule(startTime);
+        address[2] memory who = [alice, bob];
+        for (uint256 i = 0; i < 2; i++) {
+            tok.mint(who[i], 1_000_000_000);
+            vm.prank(who[i]);
+            tok.approve(address(rr), type(uint256).max);
+        }
+    }
+
+    /// @dev The re-entrant call is refused with `Reentrancy` specifically. Asserting the selector
+    /// matters: a re-entrant `claim` from an address with nothing owed would also revert, with
+    /// `NothingOwed`, and that would pass a bare "it reverted" check without the guard doing anything.
+    function test_ClaimIsNotReentrant() public {
+        (MakoRoundsV1 rr, ReentrantUSDC tok, uint256 id) = _roundsWithReentrant();
+        vm.prank(alice);
+        rr.enter(id, MakoRoundsV1.Side.Up, 10_000_000);
+        vm.prank(bob);
+        rr.enter(id, MakoRoundsV1.Side.Down, 30_000_000);
+        _arm(_anchorBytes(), uint32(startTime), 100e18);
+        _arm(_closeBytes(), uint32(closeTime), 101e18);
+        vm.warp(closeTime);
+        rr.settle(id, _anchorBytes(), _closeBytes());
+
+        tok.arm(address(rr), abi.encodeCall(MakoRoundsV1.claim, (id)));
+        vm.prank(alice);
+        rr.claim(id);
+        assertEq(bytes4(tok.lastRevert()), MakoRoundsV1.Reentrancy.selector);
+    }
+
+    function test_WithdrawTreasuryIsNotReentrant() public {
+        (MakoRoundsV1 rr, ReentrantUSDC tok, uint256 id) = _roundsWithReentrant();
+        vm.prank(alice);
+        rr.enter(id, MakoRoundsV1.Side.Up, 10_000_000);
+        vm.prank(bob);
+        rr.enter(id, MakoRoundsV1.Side.Down, 30_000_000);
+        _arm(_anchorBytes(), uint32(startTime), 100e18);
+        _arm(_closeBytes(), uint32(closeTime), 101e18);
+        vm.warp(closeTime);
+        rr.settle(id, _anchorBytes(), _closeBytes());
+
+        tok.arm(address(rr), abi.encodeCall(MakoRoundsV1.withdrawTreasury, ()));
+        vm.prank(TREASURY);
+        rr.withdrawTreasury();
+        assertEq(bytes4(tok.lastRevert()), MakoRoundsV1.Reentrancy.selector);
+    }
+
+    function test_EnterIsNotReentrant() public {
+        (MakoRoundsV1 rr, ReentrantUSDC tok, uint256 id) = _roundsWithReentrant();
+        tok.arm(address(rr), abi.encodeCall(MakoRoundsV1.enter, (id, MakoRoundsV1.Side.Up, 1_000_000)));
+        vm.warp(BASE);
+        vm.prank(alice);
+        rr.enter(id, MakoRoundsV1.Side.Up, 1_000_000);
+        assertEq(bytes4(tok.lastRevert()), MakoRoundsV1.Reentrancy.selector);
+    }
+
+    /// @notice An outbound transfer that falls short reverts the whole claim.
+    function test_ShortOutboundTransferReverts() public {
+        ShortTransferUSDC tok = new ShortTransferUSDC();
+        address[] memory cs = new address[](1);
+        cs[0] = creator;
+        MakoRoundsV1 rr = new MakoRoundsV1(TREASURY, address(tok), cs);
+        vm.prank(creator);
+        uint256 id = rr.schedule(startTime);
+        address[2] memory who = [alice, bob];
+        for (uint256 i = 0; i < 2; i++) {
+            tok.mint(who[i], 1_000_000_000);
+            vm.prank(who[i]);
+            tok.approve(address(rr), type(uint256).max);
+        }
+        vm.prank(alice);
+        rr.enter(id, MakoRoundsV1.Side.Up, 10_000_000);
+        vm.prank(bob);
+        rr.enter(id, MakoRoundsV1.Side.Down, 30_000_000);
+        _arm(_anchorBytes(), uint32(startTime), 100e18);
+        _arm(_closeBytes(), uint32(closeTime), 101e18);
+        vm.warp(closeTime);
+        rr.settle(id, _anchorBytes(), _closeBytes());
+
+        tok.setShortchange(true);
+        uint256 owed = rr.roundOf(id).distributable;
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(MakoRoundsV1.InexactTransfer.selector, owed, owed - 1));
+        rr.claim(id);
+        assertFalse(rr.stakeClaimed(id, alice), "a failed claim leaves no trace");
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // slice 3: N6
+    // ---------------------------------------------------------------------------------------------
+
+    /// @notice N6: a stake, the creator's seed included, cannot leave before a terminal state.
+    /// @dev There is no withdraw-before-settlement function at all, so the only exit is `claim`, and
+    /// `claim` refuses a non-terminal round.
+    function test_SeedLocked() public {
+        vm.warp(BASE);
+        vm.prank(creator);
+        rounds.enter(roundId, MakoRoundsV1.Side.Up, 10_000_000);
+        vm.prank(creator);
+        vm.expectRevert(MakoRoundsV1.RoundNotTerminal.selector);
+        rounds.claim(roundId);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // slice boundary
+    // ---------------------------------------------------------------------------------------------
 }

@@ -13,21 +13,18 @@ interface IERC20 {
 /// @notice Creator-hosted scheduled BTC/USD rounds, settled from Chainlink Data Streams reports the
 /// contract verifies on-chain.
 ///
-/// @dev SLICES 1 AND 2 OF 3. Slice 1 was the lifecycle and permissionless settlement, deliberately
+/// @dev BUILT IN THREE SLICES. Slice 1 was the lifecycle and permissionless settlement, deliberately
 /// money-free so the verifier-backed settlement boundary could be reviewed apart from token custody.
-/// Slice 2 adds entry, pools and fee accounting.
+/// Slice 2 added entry, pools and fee accounting. Slice 3 adds every path by which money leaves.
 ///
-///   slice 1  lifecycle, scheduling, state transitions, settlement through `RoundSettlement`  DONE
-///   slice 2  entry, exact-USDC transfer semantics, pools, fee accounting, conservation       DONE
-///   slice 3  claims, refund payouts, treasury withdrawal, reentrancy boundaries              TO DO
+///   slice 1  lifecycle, scheduling, state transitions, settlement through `RoundSettlement`
+///   slice 2  entry, exact-USDC transfer semantics, pools, fee accounting, conservation
+///   slice 3  finalizeRefund, claim, withdrawTreasury, the rounding remainder, reentrancy
 ///
-/// MONEY COMES IN BUT CANNOT YET GO OUT. Slice 2 takes USDC on `enter` and computes exactly what
-/// every party is owed, but `claim`, `finalizeRefund` and `withdrawTreasury` are slice 3, so nothing
-/// can leave the contract. That is the point of the slice boundary and the reason this is still not
-/// deployable: deploying it would strand every entrant's stake. Slice 3 is not optional polish.
-///
-/// Nothing here is deployable on its own. `MAX_ACTIVE_ROUNDS` is also provisional until the T0.1c
-/// capacity gate passes at 10 (`SPEC.md` §4).
+/// STILL NOT DEPLOYABLE, for reasons outside this file: `onReport` (the CRE path) is unbuilt until
+/// the forwarder's metadata layout is pinned; `MAX_ACTIVE_ROUNDS` is provisional until the T0.1c
+/// capacity gate passes at 10 (`SPEC.md` §4); and the deferred §2 and §6 proof items plus the
+/// adversarial and Codex reviews all block deployment.
 ///
 /// WHAT THIS CONTRACT PROVES THAT THE LIBRARY CANNOT. `RoundSettlement` sees one report and one
 /// boundary, so it cannot know which boundary is correct, whether settlement is early, whether the
@@ -182,9 +179,30 @@ contract MakoRoundsV1 {
         uint256 protocolFee;
         uint256 creatorFee;
         uint256 distributable;
+        // --- slice 3 ---
+        /// @dev How many winners have claimed, against the winning side's entrant count. The
+        /// rounding remainder is known, and swept, only when the LAST winner claims.
+        uint32 winnersClaimed;
+        /// @dev Sum of payouts made so far. `distributable - paidOut` is the remainder.
+        uint256 paidOut;
     }
 
     mapping(uint256 => mapping(address => Stake)) private _stakes;
+
+    /// @notice Protocol fees and swept rounding remainders, owed to `TREASURY`.
+    /// @dev One running balance rather than per round, because `withdrawTreasury` pays it all at once
+    /// and nothing else may ever spend it.
+    uint256 public treasuryBalance;
+
+    /// @dev One flag per (round, address) for the stake half of `claim`, and one per round for the
+    /// creator fee, so the two halves are each paid at most once and independently. N19.
+    mapping(uint256 => mapping(address => bool)) private _stakeClaimed;
+    mapping(uint256 => bool) private _creatorFeeClaimed;
+
+    /// @dev 1 idle, 2 inside a value-moving call. N8 requires every value-moving function to be BOTH
+    /// `nonReentrant` and balance-delta checked, because neither is sufficient alone: the guard stops
+    /// a re-entrant call, the delta check stops a token that moves the wrong amount.
+    uint256 private _lock = 1;
 
     mapping(uint256 => Round) private _rounds;
 
@@ -241,6 +259,10 @@ contract MakoRoundsV1 {
         uint256 indexed roundId, uint256 total, uint256 protocolFee, uint256 creatorFee, uint256 distributable
     );
 
+    event Claimed(uint256 indexed roundId, address indexed who, uint256 stakePart, uint256 creatorFeePart);
+    event RemainderSwept(uint256 indexed roundId, uint256 amount);
+    event TreasuryWithdrawn(address indexed to, uint256 amount);
+
     // ---------------------------------------------------------------------------------------------
     // Errors
     // ---------------------------------------------------------------------------------------------
@@ -266,6 +288,18 @@ contract MakoRoundsV1 {
     error TransferFailed();
     error InexactTransfer(uint256 expected, uint256 received);
     error RoundIsOneSided();
+    error Reentrancy();
+    error NotRefundableYet();
+    error RoundNotTerminal();
+    error NothingOwed();
+    error NotTreasury();
+
+    modifier nonReentrant() {
+        if (_lock != 1) revert Reentrancy();
+        _lock = 2;
+        _;
+        _lock = 1;
+    }
 
     // ---------------------------------------------------------------------------------------------
 
@@ -363,7 +397,9 @@ contract MakoRoundsV1 {
             downEntrants: 0,
             protocolFee: 0,
             creatorFee: 0,
-            distributable: 0
+            distributable: 0,
+            winnersClaimed: 0,
+            paidOut: 0
         });
 
         creatorActiveRound[msg.sender] = roundId;
@@ -403,7 +439,7 @@ contract MakoRoundsV1 {
     /// fee formula can make a creator self-filling both sides unprofitable, since the thin side
     /// carries the better payout. Forbidding the same wallet from taking both sides is the control
     /// that actually bites.
-    function enter(uint256 roundId, Side side, uint256 amount) external {
+    function enter(uint256 roundId, Side side, uint256 amount) external nonReentrant {
         Round storage r = _existing(roundId);
 
         if (side != Side.Up && side != Side.Down) revert InvalidSide();
@@ -447,7 +483,7 @@ contract MakoRoundsV1 {
         if (!ok) revert TransferFailed();
         // Length is checked explicitly rather than left to `abi.decode` to panic on, so a malformed
         // return fails with this contract's own error instead of a bare Panic.
-        if (data.length != 0 && (data.length != 32 || !abi.decode(data, (bool)))) revert TransferFailed();
+        if (data.length != 0 && (data.length != 32 || !abi.decode(data, (bool)))) revert TransferFailed(); // inbound
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -547,6 +583,10 @@ contract MakoRoundsV1 {
         r.creatorFee = creatorFee;
         r.distributable = total - protocolFee - creatorFee;
 
+        // The protocol fee is owed to the treasury the moment the round settles. The creator fee is
+        // NOT added here: it belongs to the creator and leaves only through their `claim`.
+        treasuryBalance += protocolFee;
+
         emit FeesAccrued(roundId, total, protocolFee, creatorFee, r.distributable);
 
         emit RoundSettled(
@@ -560,6 +600,145 @@ contract MakoRoundsV1 {
             r.closeReportHash,
             msg.sender
         );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Refunds
+    // ---------------------------------------------------------------------------------------------
+
+    /// @notice Moves a round to REFUNDED when it can never settle. Anyone may call it, per SPEC §8.
+    ///
+    /// @dev Two reasons, and neither can overlap with settlement:
+    ///   OneSided  from `entryCloseTime`, when either pool is empty. Pools cannot change after
+    ///             `entryCloseTime`, so this depends on pool sizes alone. `settle` refuses a
+    ///             one-sided round outright, so the two are mutually exclusive BY CONDITION. N3.
+    ///   NoPrice   from `submitDeadline`, when the round is still not terminal. `settle` reverts at
+    ///             `submitDeadline`, so the two are disjoint IN TIME. N13.
+    /// A Tie is not here: it is decided inside `settle`, because it needs the prices.
+    ///
+    /// N5: this is what stops funds being stuck past `submitDeadline`. It is also the ONLY thing
+    /// that frees a capacity slot from a round nobody settled, which is why it being permissionless
+    /// matters beyond convenience: anyone can unjam the contract, not only the creator who walked
+    /// away. No fees on any refund, so `sum(refunds) == total` by construction.
+    function finalizeRefund(uint256 roundId) external {
+        Round storage r = _existing(roundId);
+        if (r.status != Status.Active) revert RoundAlreadyTerminal(); // refund guard
+
+        RefundReason reason;
+        if (block.timestamp >= r.startTime - ENTRY_LEAD && (r.upPool == 0 || r.downPool == 0)) {
+            reason = RefundReason.OneSided;
+        } else if (block.timestamp >= r.startTime + DURATION + SUBMIT_WINDOW) {
+            reason = RefundReason.NoPrice;
+        } else {
+            revert NotRefundableYet();
+        }
+
+        _releaseSlot(r);
+        r.status = Status.Refunded;
+        r.refundReason = reason;
+        emit RoundRefunded(roundId, reason);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Claims
+    // ---------------------------------------------------------------------------------------------
+
+    /// @notice Pays the caller everything they are owed on one round, in one call.
+    ///
+    /// @dev Two independent parts, each payable at most once (N19):
+    ///   - their payout if they backed the winning side, or their whole stake if the round refunded
+    ///   - the creator fee, if they are this round's creator and it SETTLED
+    /// A creator who never entered can call this for the fee alone. A loser is owed nothing, and the
+    /// call reverts rather than succeeding with a zero transfer, as SPEC §7 requires.
+    ///
+    /// Pull, never push: nothing is sent unprompted, so one recipient that cannot receive can never
+    /// block anyone else's money.
+    function claim(uint256 roundId) external nonReentrant {
+        Round storage r = _existing(roundId);
+        if (r.status != Status.Settled && r.status != Status.Refunded) revert RoundNotTerminal();
+
+        uint256 stakePart;
+        uint256 feePart;
+
+        Stake storage stake = _stakes[roundId][msg.sender];
+        if (stake.amount != 0 && !_stakeClaimed[roundId][msg.sender]) {
+            if (r.status == Status.Refunded) {
+                // Exactly the stake, whatever the reason. No fees on a refund.
+                stakePart = stake.amount;
+                _stakeClaimed[roundId][msg.sender] = true;
+            } else if (stake.side == (r.outcome == Outcome.Up ? Side.Up : Side.Down)) {
+                uint256 winningPool = r.outcome == Outcome.Up ? r.upPool : r.downPool;
+                // Floored per winner, per SPEC §7. The truncation accumulates as the remainder.
+                stakePart = (stake.amount * r.distributable) / winningPool;
+                _stakeClaimed[roundId][msg.sender] = true;
+                r.paidOut += stakePart;
+
+                uint32 winners = r.outcome == Outcome.Up ? r.upEntrants : r.downEntrants;
+                if (++r.winnersClaimed == winners) {
+                    // THE LAST WINNER SWEEPS THE REMAINDER. Only now is it known, since a floor was
+                    // taken per winner. A winner who never claims holds this back indefinitely:
+                    // their money is unclaimed, not stuck, and the remainder waits for them. SPEC §7
+                    // authorises no timer that would take it sooner.
+                    uint256 remainder = r.distributable - r.paidOut;
+                    if (remainder != 0) {
+                        treasuryBalance += remainder;
+                        emit RemainderSwept(roundId, remainder);
+                    }
+                }
+            }
+            // A loser: nothing marked, nothing paid. They simply have no claim on the stake half.
+        }
+
+        if (r.status == Status.Settled && msg.sender == r.creator && !_creatorFeeClaimed[roundId]) {
+            feePart = r.creatorFee;
+            _creatorFeeClaimed[roundId] = true;
+        }
+
+        uint256 owed = stakePart + feePart;
+        if (owed == 0) revert NothingOwed();
+
+        // Every flag above is written BEFORE the transfer: checks, effects, then the interaction.
+        // `nonReentrant` is the second line of defence, not the only one.
+        _safeTransferOut(msg.sender, owed);
+        emit Claimed(roundId, msg.sender, stakePart, feePart);
+    }
+
+    /// @notice Whether an address's stake half has been claimed, and whether a round's creator fee
+    /// has been. For clients and for the watchdog.
+    function stakeClaimed(uint256 roundId, address who) external view returns (bool) {
+        return _stakeClaimed[roundId][who];
+    }
+
+    function creatorFeeClaimed(uint256 roundId) external view returns (bool) {
+        return _creatorFeeClaimed[roundId];
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Treasury
+    // ---------------------------------------------------------------------------------------------
+
+    /// @notice Sends accrued protocol fees and swept remainders to `TREASURY`.
+    /// @dev `TREASURY` only, and to `TREASURY` only: the destination is the immutable rather than a
+    /// parameter, so even the treasury key cannot send the money anywhere else. N19.
+    function withdrawTreasury() external nonReentrant {
+        if (msg.sender != TREASURY) revert NotTreasury();
+        uint256 amount = treasuryBalance;
+        if (amount == 0) revert NothingOwed();
+        treasuryBalance = 0;
+        _safeTransferOut(TREASURY, amount);
+        emit TreasuryWithdrawn(TREASURY, amount);
+    }
+
+    /// @dev The mirror of `_safeTransferFrom`, and checked the same way. A token that sends less than
+    /// asked would leave the accounting right and the balance wrong, surfacing much later as a claim
+    /// that cannot be paid. State is already written when this runs, so it reverts the whole call.
+    function _safeTransferOut(address to, uint256 amount) private {
+        uint256 before = USDC.balanceOf(address(this));
+        (bool ok, bytes memory data) = address(USDC).call(abi.encodeCall(IERC20.transfer, (to, amount)));
+        if (!ok) revert TransferFailed();
+        if (data.length != 0 && (data.length != 32 || !abi.decode(data, (bool)))) revert TransferFailed(); // outbound
+        uint256 sent = before - USDC.balanceOf(address(this));
+        if (sent != amount) revert InexactTransfer(amount, sent);
     }
 
     // ---------------------------------------------------------------------------------------------

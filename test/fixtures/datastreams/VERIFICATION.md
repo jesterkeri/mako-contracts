@@ -195,8 +195,8 @@ Every mutation runs on a copy in a temp directory. `git checkout` is never used,
 about undoing uncommitted work, and both runners assert the working-tree file is byte-identical to
 where it started.
 
-**Solidity: 42 mutations, 42 killed, 0 survived.** Every one caught at RUNTIME by a
-named test, none merely by failing to compile. Run 2026-09-24 against slices 1 and 2.
+**Solidity: 57 mutations, 57 killed.** Every one caught at RUNTIME by a named test.
+Run 2026-09-24 against all three slices of `MakoRoundsV1`.
 
 ### `src/RoundSettlement.sol` (15 mutations)
 
@@ -218,19 +218,20 @@ named test, none merely by failing to compile. Run 2026-09-24 against slices 1 a
 | step 7 | delete the expiry check | `test_LibraryAgreesWithTheCorpusOnEveryMockRow` |
 | step 3 | decode the SUBMITTED bytes instead of the verified return | `test_LibraryAgreesWithTheCorpusOnEveryMockRow` |
 
-### `src/MakoRoundsV1.sol`, slices 1 and 2 (27 mutations)
+### `src/MakoRoundsV1.sol`, slices 1 to 3 (42 mutations)
 
-The round-level guards the library cannot make, plus entry, exact-token semantics and fee accounting.
+Round-level guards the library cannot make; entry and exact-token semantics; fee accounting; and every path by
+which money leaves.
 
 | Clause | Mutation | Killed by |
 |---|---|---|
 | SPEC 3 lifecycle | allow settlement before closeTime | `test_SettleRevertsBeforeCloseTime` |
 | N13 | allow settlement at or after submitDeadline | `test_SettleAndRefundWindowsDisjoint`, `test_StuckRoundsHoldCapacityUntilSomeoneRefundsThem` |
 | SPEC 3 terminal states | allow a round to settle twice | `test_ARefundedRoundCannotThenSettle`, `test_RoundSettlesAtMostOnce` |
-| N25 | check the anchor against closeTime instead of startTime | `test_ARefundChargesNoFees`, `test_ARefundedRoundCannotThenSettle`, `test_AnchorSecondIsStartTime`, +10 more |
-| N1 | check the close against startTime instead of closeTime | `test_ARefundChargesNoFees`, `test_ARefundedRoundCannotThenSettle`, `test_EntryIntoATerminalRoundReverts`, +9 more |
-| SPEC 5.3 | invert the outcome direction | `test_OutcomeDownWhenCloseIsLower`, `test_OutcomeUpWhenCloseIsHigher`, `test_SettlementEmitsEvidence` |
-| SPEC 5.3 | settle a tie as UP instead of refunding | `test_ARefundChargesNoFees`, `test_ARefundedRoundCannotThenSettle`, `test_EqualPricesRefundAsTie` |
+| N25 | check the anchor against closeTime instead of startTime | `test_ARefundChargesNoFees`, `test_ARefundedRoundCannotThenSettle`, `test_AnchorSecondIsStartTime`, +23 more |
+| N1 | check the close against startTime instead of closeTime | `test_ARefundChargesNoFees`, `test_ARefundedRoundCannotThenSettle`, `test_ClaimIsNotReentrant`, +22 more |
+| SPEC 5.3 | invert the outcome direction | `test_ClaimIsNotReentrant`, `test_CreatorWhoWonGetsPayoutAndFeeInOneCall`, `test_LoserClaimReverts`, +6 more |
+| SPEC 5.3 | settle a tie as UP instead of refunding | `test_ARefundChargesNoFees`, `test_ARefundedRoundCannotThenSettle`, `test_EqualPricesRefundAsTie`, +2 more |
 | N27 | drop the whole-minute boundary requirement | `test_StartTimeOnMinute` |
 | SPEC 8 | drop the creator allowlist | `test_OnlyCreatorsMaySchedule` |
 | SPEC 4 | drop the per-creator active-round limit | `test_OneNonTerminalRoundPerCreator` |
@@ -250,19 +251,45 @@ The round-level guards the library cannot make, plus entry, exact-token semantic
 | N3, SPEC 5.2 per-submission, SPEC.md:135 | allow a one-sided round to settle | `test_OneSidedRoundCannotSettle` |
 | SPEC 7 | charge the protocol fee on the smaller side instead of the total | `test_FeesFollowTheSpecFormula` |
 | SPEC 7 | charge the creator fee on the total instead of the smaller side | `test_FeesFollowTheSpecFormula` |
-| SPEC 7 conservation | leave the fees inside distributable | `test_FeesFollowTheSpecFormula` |
+| SPEC 7 conservation | leave the fees inside distributable | `test_CreatorWhoWonGetsPayoutAndFeeInOneCall`, `test_FeesFollowTheSpecFormula` |
+| N3, settle/refund exclusivity | refund a two-sided round as OneSided | `test_FinalizeRefundAfterDeadline`, `test_TwoSidedRoundCannotRefundAsOneSided` |
+| N5, N13 | allow NoPrice before submitDeadline | `test_FinalizeRefundAfterDeadline`, `test_TwoSidedRoundCannotRefundAsOneSided` |
+| SPEC 3 terminal states | allow finalizeRefund on a terminal round | `test_FinalizeRefundOnATerminalRoundReverts` |
+| N6 | allow claiming before a terminal state | `test_ClaimBeforeTerminalReverts`, `test_SeedLocked` |
+| SPEC 7, losers receive nothing | pay any entrant as if they won | `test_LoserClaimReverts` |
+| N19 no double claim | never mark a stake claimed | `test_CreatorWhoWonGetsPayoutAndFeeInOneCall`, `test_NoDoubleClaim` |
+| N19 creator fee once | never mark the creator fee claimed | `test_CreatorWhoWonGetsPayoutAndFeeInOneCall`, `test_ZeroStakeCreatorClaimsFee` |
+| N19 fees only on SETTLED | pay the creator fee on a refunded round | `test_RefundRecordsNoCreatorFee`, added after this mutant **survived** the first sweep |
+| N17 | sweep the remainder on the first winner, not the last | `test_RemainderWaitsForTheLastWinner` |
+| SPEC 7, N17 | pay winners from the total instead of distributable | `test_ClaimIsNotReentrant`, `test_CreatorWhoWonGetsPayoutAndFeeInOneCall`, `test_NoDoubleClaim`, +2 more |
+| N19 | let anyone withdraw the treasury | `test_TreasuryOnly` |
+| N17, double spend | do not zero the treasury balance on withdrawal | `test_TreasuryOnly` |
+| N8, N17 | ignore an outbound shortfall | `test_ShortOutboundTransferReverts` |
+| N8 | remove the reentrancy guard | `test_ClaimIsNotReentrant`, `test_EnterIsNotReentrant`, `test_WithdrawTreasuryIsNotReentrant` |
+| N17, N19 | do not accrue the protocol fee to the treasury | `test_TreasuryOnly`, `test_WithdrawTreasuryIsNotReentrant` |
 
 **What the runs found beyond the counts.**
 
-- The mutation swapping the anchor's boundary to `closeTime` was at first killed only by unrelated tests, never
-  by `test_AnchorSecondIsStartTime`, which armed the anchor at `startTime ± 1` and so passed regardless. The
-  test now also arms the anchor at `closeTime` and kills that mutation on its own.
-- One sweep reported a mutation SKIPPED because its anchor matched twice after `enter` reused the settlement
-  guard's exact line. The runner refused to apply an ambiguous mutation rather than report a false kill. The
-  two guards are now distinguishable and each has its own mutation.
-- One sweep's `KILLED_AT_COMPILE` results were void because the source was edited while it ran, so its temp
-  copies picked up half-finished code. It was discarded and re-run with no concurrent edits. This table is
-  from the clean run.
+- **One mutant survived the full sweep:** dropping `r.status == Status.Settled` from the creator-fee condition.
+  A refunded round's `creatorFee` is always zero, so the mutant pays nothing extra and every balance stays right,
+  which is why no balance assertion caught it. But it still sets the creator-fee flag, so `creatorFeeClaimed` would
+  report a fee claimed on a round that never had one. `test_RefundRecordsNoCreatorFee` now asserts that flag and
+  kills the mutant on its own. Balances were never the only thing that had to be true.
+- The mutation swapping the anchor's boundary to `closeTime` was at first killed only by unrelated tests, never by
+  `test_AnchorSecondIsStartTime`, which armed the anchor at `startTime ± 1` and passed regardless. It now also arms
+  the anchor at `closeTime` and kills that mutation on its own.
+- One sweep reported a mutation SKIPPED because its anchor matched twice. The runner refused to apply an ambiguous
+  mutation rather than report a false kill. Every guard that shares a line with another is now tagged.
+- One sweep's results were void because the source was edited while it ran. It was discarded and re-run clean.
+
+### N7 and N10, which Solidity cannot prove
+
+A test cannot enumerate a contract's functions, so a `test_NoSetters` could only check for the setters its author
+thought of. `script/check-surface.mjs` instead asserts the compiled ABI: exactly six state-changing functions
+(`claim`, `enter`, `finalizeRefund`, `schedule`, `settle`, `withdrawTreasury`), none payable, no fallback, and no
+name implying pause, ownership, administration or upgrade. Verified to fail when a setter and a pause are added.
+Its first run failed the REAL contract, because a case-insensitive setter pattern matched the `t` in `settle`; the
+setter pattern is now case-sensitive.
 
 ---
 

@@ -55,5 +55,8 @@ jobs:
       - name: Every SPEC 5.2 clause is load-bearing (reference implementation)
         run: node script/mutate-reference.mjs
 
+      - name: External surface is exactly the allowlist (N7 no setters, N10 no pause)
+        run: node script/check-surface.mjs
+
       - name: Every SPEC 5.2 clause is load-bearing (shipping library)
         run: node script/mutate-solidity.mjs

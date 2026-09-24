@@ -30,7 +30,7 @@ contract MockUSDC {
         return true;
     }
 
-    function transfer(address to, uint256 amount) external returns (bool) {
+    function transfer(address to, uint256 amount) external virtual returns (bool) {
         balanceOf[msg.sender] -= amount;
         balanceOf[to] += amount;
         return true;
@@ -112,6 +112,64 @@ contract OvershootUSDC is MockUSDC {
         allowance[from][msg.sender] -= amount;
         balanceOf[from] -= amount;
         balanceOf[to] += amount + 1;
+        return true;
+    }
+}
+
+/// @notice Sends one unit less than asked on `transfer`, so an OUTBOUND payment falls short.
+/// @dev The mirror of fee-on-transfer. Without the outbound balance check the accounting records a
+/// full payout while the recipient received less, and the books stop matching the balance.
+contract ShortTransferUSDC is MockUSDC {
+    bool public shortchange;
+
+    function setShortchange(bool yes) external {
+        shortchange = yes;
+    }
+
+    function transfer(address to, uint256 amount) external override returns (bool) {
+        uint256 sent = shortchange ? amount - 1 : amount;
+        balanceOf[msg.sender] -= sent;
+        balanceOf[to] += sent;
+        return true;
+    }
+}
+
+/// @notice Calls back into a target during `transfer`, to prove every value-moving path is guarded.
+/// @dev N8 wants one reentrancy test per value-moving function. The callback is set per test, so the
+/// same token can attack `claim`, `withdrawTreasury` and `enter`.
+contract ReentrantUSDC is MockUSDC {
+    address public target;
+    bytes public payload;
+    bool public armed;
+    bytes public lastRevert;
+
+    function arm(address t, bytes calldata p) external {
+        target = t;
+        payload = p;
+        armed = true;
+    }
+
+    function _attack() internal {
+        if (!armed) return;
+        armed = false;
+        (bool ok, bytes memory ret) = target.call(payload);
+        // Record rather than bubble: the test asserts the re-entrant call was REFUSED, and the outer
+        // call is then free to complete so the test can check nothing was paid twice.
+        if (!ok) lastRevert = ret;
+    }
+
+    function transfer(address to, uint256 amount) external override returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        _attack();
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external override returns (bool) {
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        _attack();
         return true;
     }
 }
