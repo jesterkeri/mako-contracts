@@ -15,6 +15,14 @@ pragma solidity 0.8.24;
 /// means every mock case exercises the shipping call path rather than a parameterised variant of it.
 contract MockVerifier {
     bytes internal returnData;
+
+    /// @dev A verified return keyed by the SUBMITTED bytes, so one mock can answer differently for a
+    /// round's anchor and close reports, which are verified in the same transaction. Falls back to
+    /// `returnData` when no key matches, preserving the single-return behaviour the rule tests use.
+    /// Keying on the input is the MOCK's behaviour and says nothing about the library, which still
+    /// decodes only what comes back: `test_DecodesVerifiedBytesNotInput` proves that separately by
+    /// returning bytes that disagree with the input entirely.
+    mapping(bytes32 => bytes) internal keyedReturns;
     address internal feeManager;
     address internal accessController;
     bool internal shouldRevert;
@@ -30,6 +38,10 @@ contract MockVerifier {
 
     function setReturnData(bytes calldata data) external {
         returnData = data;
+    }
+
+    function setReturnFor(bytes calldata submitted, bytes calldata data) external {
+        keyedReturns[keccak256(submitted)] = data;
     }
 
     function setFeeManager(address fm) external {
@@ -86,9 +98,12 @@ contract MockVerifier {
             }
         }
 
-        // Deliberately ignores `payload`. The whole point of `test_DecodesVerifiedBytesNotInput` is
-        // that the library must trust what comes back, not what went in.
-        payload;
+        bytes memory keyed = keyedReturns[keccak256(payload)];
+        if (keyed.length != 0) return keyed;
+
+        // Otherwise the canned return, deliberately ignoring `payload`. The whole point of
+        // `test_DecodesVerifiedBytesNotInput` is that the library must trust what comes back, not
+        // what went in.
         return returnData;
     }
 }

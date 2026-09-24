@@ -195,10 +195,12 @@ Every mutation runs on a copy in a temp directory. `git checkout` is never used,
 about undoing uncommitted work, and both runners assert the working-tree file is byte-identical to
 where it started.
 
-**Solidity, `src/RoundSettlement.sol`: 15 mutations, 15 killed, 0 survived.** Every one was
-caught at RUNTIME by a named test, not merely by failing to compile.
+**Solidity: 28 mutations, 28 killed, 0 survived.** Every one caught at RUNTIME by a
+named test, not by failing to compile.
 
-| § | Mutation | Killed by |
+### `src/RoundSettlement.sol` (15 mutations)
+
+| Clause | Mutation | Killed by |
 |---|---|---|
 | step 1 | delete the fee-manager gate | `test_FeeManagerCheckRunsBeforeVerify`, `test_LibraryAgreesWithTheCorpusOnEveryMockRow` |
 | step 2 | pass a non-empty parameterPayload | `test_LibraryAgreesWithTheCorpusOnEveryMockRow`, `test_VerifierCalledWithEmptyParameterPayload` |
@@ -216,17 +218,32 @@ caught at RUNTIME by a named test, not merely by failing to compile.
 | step 7 | delete the expiry check | `test_LibraryAgreesWithTheCorpusOnEveryMockRow` |
 | step 3 | decode the SUBMITTED bytes instead of the verified return | `test_LibraryAgreesWithTheCorpusOnEveryMockRow` |
 
-Three of those kills justify rows that would otherwise look like padding:
+### `src/MakoRoundsV1.sol`, slice 1 (13 mutations)
 
-- **`>=` instead of `>` on the spread** is caught only by `accept-spread-exactly-at-limit`.
-- **`>=` instead of `>` on expiry** is caught only by `accept-at-expiry-boundary`.
-- **taking the difference in int192** is caught only by `reject-spread-max-integer-must-not-panic`,
-  the row N11 mandates. Without it the mutation panics with `0x11` and the case passes for the
-  wrong reason, never reaching the spread check it claims to exercise.
+The round-level guards the library deliberately cannot make.
 
-And one is the attack the whole design exists to stop: **decoding the submitted bytes instead of
-the verified return**. A library reading its own input accepts whatever the caller wrote, which is
-how an adversarial review settled a $1,000,000 BTC price from `fullReport = 0xdead`.
+| Clause | Mutation | Killed by |
+|---|---|---|
+| SPEC 3 lifecycle | allow settlement before closeTime | `test_SettleRevertsBeforeCloseTime` |
+| N13 | allow settlement at or after submitDeadline | `test_SettleAndRefundWindowsDisjoint` |
+| SPEC 3 terminal states | allow a round to settle twice | `test_ARefundedRoundCannotThenSettle`, `test_RoundSettlesAtMostOnce` |
+| N25 | check the anchor against closeTime instead of startTime | `test_ARefundedRoundCannotThenSettle`, `test_EqualPricesRefundAsTie`, `test_OutcomeDownWhenCloseIsLower`, `test_OutcomeUpWhenCloseIsHigher`, … |
+| N1 | check the close against startTime instead of closeTime | `test_ARefundedRoundCannotThenSettle`, `test_EqualPricesRefundAsTie`, `test_OutcomeDownWhenCloseIsLower`, `test_OutcomeUpWhenCloseIsHigher`, … |
+| SPEC 5.3 | invert the outcome direction | `test_OutcomeDownWhenCloseIsLower`, `test_OutcomeUpWhenCloseIsHigher`, `test_SettlementEmitsEvidence` |
+| SPEC 5.3 | settle a tie as UP instead of refunding | `test_ARefundedRoundCannotThenSettle`, `test_EqualPricesRefundAsTie` |
+| N27 | drop the whole-minute boundary requirement | `test_StartTimeOnMinute` |
+| SPEC 8 | drop the creator allowlist | `test_OnlyCreatorsMaySchedule` |
+| SPEC 4 | drop the per-creator active-round limit | `test_OneNonTerminalRoundPerCreator` |
+| SPEC 4, MAX_ACTIVE_ROUNDS | drop the global active-round cap | `test_GlobalActiveRoundCapIsEnforced` |
+| SPEC 4, MIN_LEAD | drop the minimum scheduling lead | `test_LeadBoundsAreEnforcedAtTheBoundaryPlusMinusOne` |
+| N2, N25 | lock entries at startTime instead of ENTRY_LEAD before it | `test_PhasesFollowTheClockWithoutATransaction` |
+
+**What the run found beyond the count.** The mutation that swaps the anchor's boundary to
+`closeTime` was killed by nine unrelated tests and NOT by `test_AnchorSecondIsStartTime`, the test
+named for that property: it armed the anchor at `startTime ± 1`, which is not `closeTime` either, so
+it reverted and passed regardless. A test that cannot fail for the reason it exists is not testing
+that reason. The test now also arms the anchor at `closeTime` and, re-run against that mutation
+alone, kills it by itself.
 
 ---
 

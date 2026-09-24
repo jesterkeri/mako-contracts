@@ -19,8 +19,8 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, '..');
-const REL = 'src/RoundSettlement.sol';
-const SRC = join(REPO, REL);
+const DEFAULT_REL = 'src/RoundSettlement.sol';
+const DEFAULT_MATCH = 'RoundSettlementTest';
 
 // Each mutation names the clause it breaks. A mutation that no test catches is a missing case.
 const MUTATIONS = [
@@ -121,15 +121,116 @@ const MUTATIONS = [
     to: '        ) = abi.decode(fullReport, (bytes32, uint32, uint32, uint192, uint192, uint32, int192, int192, int192));',
     note: 'The attack the whole design exists to stop. A library reading its input accepts whatever the caller wrote.',
   },
+  // ---- slice 1 of MakoRoundsV1: the guards the library deliberately cannot make ----
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test',
+    name: 'rounds: allow settlement before closeTime',
+    clause: 'SPEC 3 lifecycle',
+    from: 'if (block.timestamp < closeTime) revert TooEarlyToSettle();',
+    to: '// mutated: early-settlement guard removed',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test',
+    name: 'rounds: allow settlement at or after submitDeadline',
+    clause: 'N13',
+    from: 'if (block.timestamp >= closeTime + SUBMIT_WINDOW) revert SubmitWindowClosed();',
+    to: '// mutated: submit-window guard removed',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test',
+    name: 'rounds: allow a round to settle twice',
+    clause: 'SPEC 3 terminal states',
+    from: 'if (r.status != Status.Active) revert RoundAlreadyTerminal();',
+    to: '// mutated: terminal-state guard removed',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test',
+    name: 'rounds: check the anchor against closeTime instead of startTime',
+    clause: 'N25',
+    from: 'RoundSettlement.check(anchorReport, uint32(r.startTime));',
+    to: 'RoundSettlement.check(anchorReport, uint32(closeTime));',
+    note: 'The anchor boundary IS the no-insider-entry property. If the anchor could be observed at closeTime, an entrant could act on a price they had seen.',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test',
+    name: 'rounds: check the close against startTime instead of closeTime',
+    clause: 'N1',
+    from: 'RoundSettlement.check(closeReport, uint32(closeTime));',
+    to: 'RoundSettlement.check(closeReport, uint32(r.startTime));',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test',
+    name: 'rounds: invert the outcome direction',
+    clause: 'SPEC 5.3',
+    from: 'Outcome outcome = close.price > anchor.price ? Outcome.Up : Outcome.Down;',
+    to: 'Outcome outcome = close.price > anchor.price ? Outcome.Down : Outcome.Up;',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test',
+    name: 'rounds: settle a tie as UP instead of refunding',
+    clause: 'SPEC 5.3',
+    from: 'if (close.price == anchor.price) {',
+    to: 'if (false) {',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test',
+    name: 'rounds: drop the whole-minute boundary requirement',
+    clause: 'N27',
+    from: 'if (startTime % BOUNDARY_STEP != 0) revert StartTimeNotOnBoundary();',
+    to: '// mutated: minute-boundary requirement removed',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test',
+    name: 'rounds: drop the creator allowlist',
+    clause: 'SPEC 8',
+    from: 'if (!_isCreator[msg.sender]) revert NotACreator();',
+    to: '// mutated: creator allowlist removed',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test',
+    name: 'rounds: drop the per-creator active-round limit',
+    clause: 'SPEC 4',
+    from: 'if (creatorActiveRound[msg.sender] != 0) revert CreatorHasActiveRound();',
+    to: '// mutated: per-creator limit removed',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test',
+    name: 'rounds: drop the global active-round cap',
+    clause: 'SPEC 4, MAX_ACTIVE_ROUNDS',
+    from: 'if (activeRoundCount >= MAX_ACTIVE_ROUNDS) revert TooManyActiveRounds();',
+    to: '// mutated: global cap removed',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test',
+    name: 'rounds: drop the minimum scheduling lead',
+    clause: 'SPEC 4, MIN_LEAD',
+    from: 'if (startTime < openTime + MIN_LEAD) revert LeadTooShort();',
+    to: '// mutated: MIN_LEAD removed',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test',
+    name: 'rounds: lock entries at startTime instead of ENTRY_LEAD before it',
+    clause: 'N2, N25',
+    from: 'if (block.timestamp >= r.startTime - ENTRY_LEAD) return Phase.Locked;',
+    to: 'if (block.timestamp >= r.startTime) return Phase.Locked;',
+  },
 ];
 
-const original = readFileSync(SRC, 'utf8');
+const sources = new Map();
+function sourceOf(rel) {
+  if (!sources.has(rel)) sources.set(rel, readFileSync(join(REPO, rel), 'utf8'));
+  return sources.get(rel);
+}
+
 let notKilled = 0;
 const results = [];
 
-console.log(`Mutation run: ${MUTATIONS.length} mutations against ${REL}\n`);
+console.log(`Mutation run: ${MUTATIONS.length} mutations\n`);
 
 for (const m of MUTATIONS) {
+  const rel = m.file || DEFAULT_REL;
+  const match = m.match || DEFAULT_MATCH;
+  const original = sourceOf(rel);
   const count = original.split(m.from).length - 1;
   if (count !== 1) {
     console.log(`  [SKIP] ${m.name}`);
@@ -144,11 +245,11 @@ for (const m of MUTATIONS) {
     for (const p of ['src', 'test', 'lib', 'foundry.toml', 'remappings.txt']) {
       try { cpSync(join(REPO, p), join(dir, p), { recursive: true }); } catch {}
     }
-    writeFileSync(join(dir, REL), original.replace(m.from, m.to));
+    writeFileSync(join(dir, rel), original.replace(m.from, m.to));
 
     let out = '', failed = false, compileError = false;
     try {
-      out = execFileSync('forge', ['test', '--root', dir, '--match-contract', 'RoundSettlementTest'], {
+      out = execFileSync('forge', ['test', '--root', dir, '--match-contract', match], {
         encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (e) {
@@ -172,17 +273,20 @@ for (const m of MUTATIONS) {
   }
 }
 
-// The working tree must be untouched. Asserted rather than assumed.
-if (readFileSync(SRC, 'utf8') !== original) {
-  console.error(`\n  FATAL: ${REL} differs from where it started. Restore it before continuing.`);
-  process.exit(2);
+// The working tree must be untouched. Asserted rather than assumed, for every file touched.
+for (const [rel, before] of sources) {
+  if (readFileSync(join(REPO, rel), 'utf8') !== before) {
+    console.error(`\n  FATAL: ${rel} differs from where it started. Restore it before continuing.`);
+    process.exit(2);
+  }
 }
 
 const killed = results.filter((r) => r.status.startsWith('KILLED')).length;
 console.log(`\n  ${killed} killed, ${notKilled} not killed`);
-console.log(`  ${REL} is byte-identical to where it started; every mutation ran on a temp copy.`);
+console.log(`  every mutated file is byte-identical to where it started; all mutations ran on temp copies.`);
 if (notKilled > 0) {
   console.log(`\n  A surviving mutation is a missing test, not a passing run.`);
   process.exit(1);
 }
-console.log(`\n  Every clause of SPEC 5.2 is load-bearing in the shipping library.`);
+console.log(`\n  Every mutated clause is load-bearing: SPEC 5.2 in the library, and the round-level`);
+console.log(`  guards the library cannot make in MakoRoundsV1.`);
