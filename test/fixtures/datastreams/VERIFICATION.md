@@ -66,33 +66,50 @@ put the credential in a public log. And the secret scan exempted two tracked fil
 **Round 5 found it incomplete again, one layer in.** The guard and the scrubber knew only compound forms:
 the whole URL, its path and its query. A provider already holds the credential, so it can return the
 token on its own, with no "/v2/" or "?apikey=" around it, and a malformed `verify` result was recorded
-verbatim. A hex-encoded key returned as that result would have been written into evidence. Now:
-- **The redaction set is built from atoms.** Every path segment and query key or value, raw and
-  percent-decoded, each also percent-encoded, hex-encoded and base64-encoded, alongside the compound
-  forms. Matching is case-insensitive.
+verbatim. A hex-encoded key returned as that result would have been written into evidence. **The
+adversary pass on the first fix then found it incomplete too:** matching a whole credential misses the
+credential minus ONE character, hex-encoded in a well-formed result, and a digits-only key minus one digit
+returned as the JSON-RPC error code reached both stdout and evidence. Now:
+- **The unit of secrecy is any 10-byte window of any credential**, not the credential. A credential atom is
+  every path segment and query key or value, as written and percent-decoded bytewise (an escape that is
+  not valid UTF-8 still decodes). Each window is matched plain, hex and percent-encoded, and every 9-byte
+  window is matched base64 and base64url, so a base64 echo of any 12 or more consecutive credential bytes
+  is caught at any alignment. Case-insensitive, for the evidence guard and for every console write.
 - **A URL the probe cannot fully redact is refused before any call.** URLs with user:password
   credentials or a #fragment are refused, and so is any path segment or query component shorter than
-  8 characters that is not a known generic part (`v2`, `rpc`, `apikey`...). A short credential is still a
-  credential. None of these refusal messages quotes the URL.
-- **Evidence keeps a provider value only if it equals its pin.** Chain id, the fee manager and access
-  controller addresses, `typeAndVersion`, and the block number, hash and timestamp are each recorded
-  verbatim only when they match the pinned value, and otherwise as `MISMATCH sha256:<hash>`. Before,
-  an address was the last 40 hex characters of whatever came back, so a hex-encoded key would have been
-  truncated into evidence, and no string guard catches a truncated key.
-- **A malformed `verify` return is recorded by hash and a fixed reason code only**, with no bytes and no
-  lengths. A return counts as well-formed only if it is exactly 352 bytes, offset 32, length 288. A
-  well-formed return is the evidence itself, so it is kept in full, and `writeEvidence` refuses it if it
-  carries any secret form.
-- `test-probe-redaction.mjs` has 18 scenarios. They cover each credential alone in error text, base64
-  in error text, hex as a malformed result, hex in a well-formed result (refused, exit 5), truncated into
-  an address word, as the block hash, and echoed percent-decoded, plus the four refused URL shapes. A
-  leak means any 10-character window of a credential, plain or hex, so a truncated key counts. **Against
-  the round-5 probe, 9 of the 18 fail**, including the exact case the review described.
-- **Out of scope, stated so nobody relies on it:** a provider that deliberately disguises the key it
-  holds, for example by interleaving or re-encoding its bytes, cannot be caught by any string guard. The
-  risk is limited by what evidence can hold: pinned-equal values, hashes, local categories, and a
-  well-formed verify return. The re-run on 2026-09-24 through QuickNode and Monad Foundation still
-  returned `VERIFIED_MATCH`, two distinct operators, with every identity value recorded verbatim.
+  8 characters, as written or decoded, that is not a known generic part (`v2`, `rpc`, `apikey`...). A
+  short credential is still a credential. None of these refusal messages quotes the URL.
+- **Evidence keeps a provider value only if it equals its pin, or both operators returned it.** Chain id,
+  the fee manager and access controller addresses, `typeAndVersion`, and the block number, hash and
+  timestamp are each recorded verbatim only when they match the pinned value, and otherwise as
+  `MISMATCH sha256:<hash>`. Before, an address was the last 40 hex characters of whatever came back, so a
+  hex-encoded key would have been truncated into evidence. The `verify` return and the fields decoded
+  from it are recorded in full **only when both providers, run by distinct operators, returned identical
+  bytes**: neither operator knows the other's credential, so a shared answer cannot carry either one.
+  Otherwise each return is recorded as a hash plus either the payload hash or a fixed reason code. A
+  return counts as well-formed only if it is exactly 352 bytes, offset 32, length 288.
+- **Only a standard JSON-RPC error code is kept** (3, or -32768 to -32000). Any other integer is
+  provider-chosen data.
+- `test-probe-redaction.mjs` has 25 scenarios:
+  - each credential alone in error text and in base64;
+  - hex as a malformed result and as a well-formed unshared result;
+  - truncated into an address word, as the block hash, and echoed percent-decoded;
+  - the adversary's four partial cases;
+  - a non-UTF-8 escape echoed as decoded bytes;
+  - four refused URL shapes;
+  - three guard cases, each expected to exit 5: the original bug put back, a bug writing the credential
+    minus one character, and a shared well-formed return carrying part of a credential.
+
+  A leak means any 10-character window of a credential, plain or hex. **Against `8f4e3b0` (the first
+  round-5 fix) 7 of the 25 fail, and against `a86525d` more do.** The adversary's own test passes 5 of 5
+  against this version. The non-UTF-8 case is a regression case only: the windows of the escaped
+  spelling already cover its ASCII part, so it does not isolate the bytewise decoder.
+- **Out of scope, stated so nobody relies on it:** a provider that deliberately transforms the key it
+  holds beyond these encodings, for example by interleaving its bytes, cannot be caught by any string
+  guard. What limits that risk is what evidence can hold: values equal to their pins, hashes, local
+  categories, standard codes, and a verify return that two distinct operators both sent. The re-run on
+  2026-09-24 through QuickNode and Monad Foundation still returned `VERIFIED_MATCH` from two distinct
+  operators, with the shared 352-byte return and every identity value recorded verbatim.
 
 ## What this proves
 

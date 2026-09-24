@@ -140,7 +140,10 @@ function categorize(err, httpStatus) {
   if (isRevert(err)) return 'revert';
   return 'rpc-error';
 }
-const rpcCodeOf = (err) => (err && Number.isInteger(err.code) ? err.code : null);
+// Only a STANDARD JSON-RPC code is kept: 3 (execution reverted) and the reserved -32768..-32000 range. Any
+// other integer is provider-chosen data, and the adversary pass showed a digits-only credential minus one
+// digit returned as `code` reaching both stdout and evidence.
+const rpcCodeOf = (err) => (err && Number.isInteger(err.code) && (err.code === 3 || (err.code >= -32768 && err.code <= -32000)) ? err.code : null);
 
 // A revert carries execution data; "missing trie node", a gas-limit refusal or a 429 do not.
 function isRevert(err) {
@@ -220,76 +223,102 @@ const urlOf = (p) => URLS.get(p.id);
 //
 // The Codex diff review (round 5) showed the guard knew only COMPOUND forms: the whole URL, its path and
 // its query. A provider holds the credential already, so it can echo the token ON ITS OWN ("invalid key
-// Qx7...") or hex-encoded in a result, and neither contains "/v2/" or "?apikey=". So the redaction set is
-// built from ATOMS: every path segment, every query key and value, raw and percent-decoded, each also
-// percent-encoded, hex-encoded and base64-encoded, alongside the compound forms.
+// Qx7...") or hex-encoded in a result, and neither contains "/v2/" or "?apikey=". The adversary pass on
+// that fix then showed that matching whole atoms is not enough either: the key minus ONE character,
+// hex-encoded in a result, matched nothing, and one missing character is trivial to brute-force.
 //
-// An atom has to be long enough to redact without also redacting ordinary text, so a URL component is
-// either a known generic part of an endpoint (`v2`, `rpc`, `apikey`...) or at least MIN_ATOM characters.
-// A short non-generic component is REFUSED at configuration time rather than left unredacted: a short
-// credential is still a credential, and the probe will not run with one it cannot recognise. User:password
-// credentials and #fragments are refused outright; neither has any use for a JSON-RPC endpoint.
+// So the unit of secrecy is any WINDOW of WINDOW bytes of any credential atom, not the atom. An atom is
+// every path segment and every query key and value, both as written and percent-decoded BYTEWISE (so an
+// escape that is not valid UTF-8 still decodes). Each window is matched plain, hex and percent-encoded,
+// and every window of WINDOW - 1 bytes is matched base64 and base64url, which covers a base64 echo of
+// any 12 or more consecutive credential bytes whatever its alignment. Matching is case-insensitive.
+//
+// An atom shorter than MIN_ATOM bytes cannot be windowed without redacting ordinary text, so a URL
+// component is either a known generic part of an endpoint (`v2`, `rpc`, `apikey`...) or at least
+// MIN_ATOM bytes, in both spellings. A short non-generic component is REFUSED at configuration time: a
+// short credential is still a credential. User:password credentials and #fragments are refused outright.
 const MIN_ATOM = 8;
+const WINDOW = 10;
 const GENERIC_COMPONENT = /^(v\d+|rpc|api|apikey|api_key|api-key|key|token|auth)$/i;
 
-function urlComponents(u) {
+/// Percent-decodes to BYTES, never failing: `%XX` becomes that byte, anything else its UTF-8 bytes.
+function pctBytes(c) {
   const out = [];
-  for (const seg of u.pathname.split('/')) if (seg) out.push(seg, safeDecode(seg));
+  for (let i = 0; i < c.length; i++) {
+    if (c[i] === '%' && /^[0-9a-fA-F]{2}$/.test(c.slice(i + 1, i + 3))) { out.push(parseInt(c.slice(i + 1, i + 3), 16)); i += 2; }
+    else out.push(...Buffer.from(c[i]));
+  }
+  return Buffer.from(out);
+}
+
+/// Each non-generic path segment and query key or value, as { raw, bytes }.
+function urlAtoms(u) {
+  const out = [];
+  for (const seg of u.pathname.split('/')) if (seg) out.push(seg);
   for (const part of u.search.replace(/^\?/, '').split('&')) {
     if (!part) continue;
     const eq = part.indexOf('=');
-    const k = eq < 0 ? part : part.slice(0, eq);
-    const v = eq < 0 ? '' : part.slice(eq + 1);
-    for (const c of [k, v]) if (c) out.push(c, safeDecode(c.replace(/\+/g, ' ')));
+    for (const c of eq < 0 ? [part] : [part.slice(0, eq), part.slice(eq + 1)]) if (c) out.push(c);
   }
-  return [...new Set(out)];
+  return out
+    .map((raw) => ({ raw, bytes: pctBytes(raw.replace(/\+/g, ' ')) }))
+    .filter((a) => !GENERIC_COMPONENT.test(a.raw) && !GENERIC_COMPONENT.test(a.bytes.toString('latin1')));
 }
-function safeDecode(c) { try { return decodeURIComponent(c); } catch { return c; } }
 
 /// Returns why a URL's shape is refused, or null. The reason never quotes the URL or any part of it.
 function refuseUrlShape(url) {
   const u = new URL(url);
   if (u.username || u.password) return 'carries user:password credentials, which this probe refuses';
   if (u.hash) return 'has a #fragment, which this probe refuses';
-  for (const c of urlComponents(u)) {
-    if (!GENERIC_COMPONENT.test(c) && c.length < MIN_ATOM) {
+  for (const a of urlAtoms(u)) {
+    if (a.raw.length < MIN_ATOM || a.bytes.length < MIN_ATOM) {
       return `has a path segment or query component shorter than ${MIN_ATOM} characters that is not a known generic part; it could not be redacted reliably, so the probe refuses it`;
     }
   }
   return null;
 }
 
-/// Every secret-bearing form of every configured URL. Hosts are not secret.
+/// Every window of `n` bytes of `b`, or `b` itself when shorter.
+function windows(b, n) {
+  if (b.length <= n) return [b];
+  const out = [];
+  for (let i = 0; i + n <= b.length; i++) out.push(b.subarray(i, i + n));
+  return out;
+}
+
+/// Every secret-bearing form of every configured URL, longest first. Hosts are not secret.
 function secretFragments() {
   const out = new Set();
-  const add = (f) => {
-    if (!f || f.length < MIN_ATOM) return;
-    for (const g of [f, encodeURIComponent(f)]) {
-      out.add(g);
-      out.add(Buffer.from(g).toString('hex'));
-      out.add(Buffer.from(g).toString('base64').replace(/=+$/, ''));
-      out.add(Buffer.from(g).toString('base64url'));
-    }
-  };
   for (const url of URLS.values()) {
     const u = new URL(url);
-    add(url);
-    if (u.pathname !== '/') add(u.pathname);
-    add(u.search);
-    for (const c of urlComponents(u)) if (!GENERIC_COMPONENT.test(c)) add(c);
+    for (const whole of [url, u.pathname !== '/' ? u.pathname : '', u.search]) if (whole.length >= MIN_ATOM) out.add(whole);
+    for (const a of urlAtoms(u)) {
+      for (const b of [Buffer.from(a.raw), a.bytes]) {
+        for (const w of windows(b, WINDOW)) {
+          out.add(w.toString('latin1'));
+          out.add(w.toString('hex'));
+          out.add(encodeURIComponent(w.toString('utf8')));
+        }
+        for (const w of windows(b, WINDOW - 1)) {
+          out.add(w.toString('base64').replace(/=+$/, ''));
+          out.add(w.toString('base64url'));
+        }
+      }
+    }
   }
-  return [...out];
+  return [...out].filter(Boolean).sort((x, y) => y.length - x.length);
 }
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /// Redacts every secret form from a string, case-insensitively (hex can come back in either case). Used
 /// on ALL console output, so a provider string that slips through some future code path still cannot put
-/// a credential in a log. It is the stdout counterpart of `writeEvidence`'s refusal.
+/// a credential in a log. It is the stdout counterpart of `writeEvidence`'s refusal. A single alternation,
+/// longest first, so overlapping windows leave no run of WINDOW credential characters behind.
 function scrub(text) {
-  let t = String(text);
-  for (const f of secretFragments()) t = t.replace(new RegExp(escapeRe(f), 'gi'), '[redacted]');
-  return t;
+  const frags = secretFragments();
+  if (!frags.length) return String(text);
+  return String(text).replace(new RegExp(frags.map(escapeRe).join('|'), 'gi'), '[redacted]');
 }
 {
   const log = console.log.bind(console);
@@ -439,6 +468,7 @@ console.log(`block ${DEFAULT_TARGET.block}, calldata ${(calldata.length - 2) / 2
 
 const results = {};
 const resultHashes = {};
+const held = {}; // provider-chosen verify bytes, recorded only if shared; see below
 for (const p of [A, B]) {
   console.log(`--- ${p.id} (${p.host}) ---`);
   const ident = await identity(p, DEFAULT_TARGET.block);
@@ -471,15 +501,18 @@ for (const p of [A, B]) {
   } else {
     console.log(`  verify: MALFORMED RETURN, ${dec.reason}`);
   }
-  // A malformed return is recorded by hash and reason code only. A well-formed one is recorded in full,
-  // since it IS the evidence, and `writeEvidence` still refuses it if it carries any secret form.
+  // The return's bytes, and every field decoded from them, are provider-chosen. They are held back here and
+  // recorded below ONLY if both providers, run by distinct operators, returned identical bytes: neither
+  // operator knows the other's credential, so a shared answer cannot carry either one. Until then a
+  // provider's return is recorded as a hash and a reason code. The adversary pass on round 5 showed a
+  // well-formed return carrying the key minus one character, which no string guard matches reliably.
   resultHashes[p.id] = sha256(String(call.body.result));
+  held[p.id] = { rawResult: call.body.result, decoded: dec };
   results[p.id] = {
     provider: p, identity: ident, identityOk: idOk, status: 'SERVED',
     attempts: call.attempts, requestHash: call.requestHash, responseHash: call.responseHash,
     rawResultSha256: resultHashes[p.id],
-    ...(dec.ok ? { rawResult: call.body.result } : {}),
-    decoded: dec,
+    decoded: dec.ok ? { ok: true, payloadSha256: dec.payloadSha256 } : dec,
   };
   console.log('');
 }
@@ -493,6 +526,11 @@ else if (resultHashes[A.id] !== resultHashes[B.id]) status = 'VERIFICATION_MISMA
 else if (!rA.decoded?.ok || !rB.decoded?.ok) status = 'VERIFICATION_MISMATCH'; // a served but malformed return
 else if (!rA.identityOk || !rB.identityOk) status = 'VERIFICATION_MISMATCH';
 else status = 'VERIFIED_MATCH';
+
+// The shared answer, recorded in full: the only provider-chosen bytes this file ever holds verbatim.
+const shared = level === 'two-distinct-operators' && resultHashes[A.id] !== undefined &&
+  resultHashes[A.id] === resultHashes[B.id] && held[A.id].decoded.ok;
+if (shared) for (const id of [A.id, B.id]) Object.assign(results[id], held[id]);
 
 const out = {
   checkedAt: new Date().toISOString(),

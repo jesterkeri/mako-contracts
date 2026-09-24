@@ -17,6 +17,8 @@
 // return each path and query credential alone: as error text, hex-encoded as a malformed result,
 // base64-encoded, percent-decoded, truncated into an address word, and as a block hash. The leak check
 // looks for any 10-character window of a credential too, since a truncated credential is still a leak.
+// The PARTIAL modes come from the adversary pass on that fix: the credential minus one character, hex in
+// a well-formed result, raw when the key is itself hex, and a digits-only key as the JSON-RPC error code.
 //
 // No network. The working tree is never modified.
 
@@ -62,11 +64,20 @@ const server = createServer((req, res) => {
     if (isVerify && MODE === 'atom-base64-error') return fail(-32000, `denied ${Buffer.from(pathAtom).toString('base64')}`);
     if (isVerify && MODE === 'atom-hex-malformed-path') return ok('0x' + hexOf(pathAtom));
     if (isVerify && MODE === 'atom-hex-malformed-query') return ok('0x' + hexOf(queryAtom));
-    if (isVerify && MODE === 'atom-wellformed-query') {
-      // A well-formed 352-byte envelope whose 288-byte payload carries the credential. It IS recorded as
-      // evidence, so the last-line guard has to refuse it.
-      return ok('0x' + (32).toString(16).padStart(64, '0') + (288).toString(16).padStart(64, '0') + hexOf(queryAtom).padEnd(576, '0'));
+    const envelope = (payloadHex) => '0x' + (32).toString(16).padStart(64, '0') + (288).toString(16).padStart(64, '0') + payloadHex.padEnd(576, '0');
+    if (isVerify && MODE === 'atom-wellformed-query') return ok(envelope(hexOf(queryAtom)));
+    if (isVerify && MODE === 'partial-hex-path') return ok(envelope(hexOf(pathAtom.slice(0, -1))));
+    if (isVerify && MODE === 'partial-hex-query') return ok(envelope(hexOf(queryAtom.slice(1))));
+    if (isVerify && MODE === 'partial-raw-hexkey') return ok(envelope(pathAtom.slice(0, -1)));
+    if (isVerify && MODE === 'partial-rpc-code') return fail(Number(queryAtom.slice(0, -1)), 'execution reverted');
+    // BOTH providers get the SAME well-formed answer carrying part of provider A's credential. Identical
+    // answers from distinct operators ARE recorded verbatim, so here the last-line guard must refuse.
+    if (isVerify && MODE === 'atom-hex-decoded-path') {
+      // The path credential percent-decoded to BYTES, which need not be valid UTF-8, then hex-encoded.
+      const bytes = Buffer.from(pathAtom.replace(/%([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16))), 'latin1');
+      return ok('0x' + bytes.toString('hex'));
     }
+    if (isVerify && MODE === 'partial-shared') return ok(envelope(hexOf(SENTINELS[0].slice(0, -1))));
     if (MODE === 'atom-address' && method === 'eth_call' && data.startsWith('0x38416b5b')) {
       // s_feeManager(): a 32-byte word ending in the credential, which a last-40-hex slice truncates.
       return ok('0x' + hexOf(pathAtom).padStart(64, '0'));
@@ -110,7 +121,8 @@ function tree({ reintroduceBug = false } = {}) {
     // Put the original defect back: serialize the full URL into the evidence object.
     const p = join(dir, 'script/probe-archive.mjs');
     const src = readFileSync(p, 'utf8');
-    const patched = src.replace('status,\n  proofLevel: level,', 'status,\n  leakedUrl: urlOf(A),\n  proofLevel: level,');
+    const leak = reintroduceBug === 'partial' ? 'urlOf(A).slice(-15, -1)' : 'urlOf(A)';
+    const patched = src.replace('status,\n  proofLevel: level,', `status,\n  leakedUrl: ${leak},\n  proofLevel: level,`);
     if (patched === src) throw new Error('could not re-introduce the bug: anchor moved');
     writeFileSync(p, patched);
   }
@@ -158,6 +170,8 @@ const leaks = (text, extra = []) => {
 const urlA = `http://${HOST}/v2/${SENTINELS[0]}?apikey=${SENTINELS[1]}`;
 const urlB = `http://${HOST}/v2/${SENTINELS[2]}?apikey=${SENTINELS[3]}`;
 const both = { MAKO_RPC_MOCK_A: urlA, MAKO_RPC_MOCK_B: urlB };
+const HEXKEY = 'feedfacecafebabe0123456789abcdef'; // an Infura-style key made only of hex characters
+const NUMKEY = '314159265358979'; // a digits-only key
 const clean = (r, extra) => leaks(r.resultText, extra).length === 0 && leaks(r.out, extra).length === 0;
 const written = (r, extra) => r.resultText !== null && clean(r, extra);
 const refusedAtConfig = (r, extra) => r.code === 2 && r.resultText !== null && clean(r, extra);
@@ -204,10 +218,43 @@ const scenarios = [
     env: { MAKO_RPC_MOCK_A: `http://${HOST}/v2/${SENTINELS[0]}?apikey=${encodeURIComponent(SENTINELS[4])}`, MAKO_RPC_MOCK_B: urlB },
     check: (r) => written(r),
   },
+  { name: 'ATOM: query credential hex in a WELL-FORMED return (not shared, so not recorded)', mode: 'atom-wellformed-query', opts: {}, env: both, check: (r) => written(r) },
+  // ---- adversary pass on round 5: part of the credential ----
+  { name: 'PARTIAL: path credential minus one char, hex, in a well-formed return', mode: 'partial-hex-path', opts: {}, env: both, check: (r) => written(r) },
+  { name: 'PARTIAL: query credential minus one char, hex, in a well-formed return', mode: 'partial-hex-query', opts: {}, env: both, check: (r) => written(r) },
   {
-    name: 'LAST-LINE GUARD: a WELL-FORMED return carrying the query credential is refused (exit 5)',
-    mode: 'atom-wellformed-query',
+    name: 'PARTIAL: hex-alphabet credential minus one char, raw, in a well-formed return',
+    mode: 'partial-raw-hexkey',
     opts: {},
+    env: { MAKO_RPC_MOCK_A: `http://${HOST}/v3/${HEXKEY}`, MAKO_RPC_MOCK_B: urlB },
+    extra: [HEXKEY],
+    check: (r) => written(r, [HEXKEY]),
+  },
+  {
+    name: 'PARTIAL: digits-only credential minus one digit, as the JSON-RPC error code',
+    mode: 'partial-rpc-code',
+    opts: {},
+    env: { MAKO_RPC_MOCK_A: `http://${HOST}/v2/${SENTINELS[0]}?apikey=${NUMKEY}`, MAKO_RPC_MOCK_B: urlB },
+    extra: [NUMKEY],
+    check: (r) => written(r, [NUMKEY]),
+  },
+  {
+    name: 'ATOM: path credential with a non-UTF-8 escape, echoed as decoded bytes in hex',
+    mode: 'atom-hex-decoded-path',
+    opts: {},
+    env: { MAKO_RPC_MOCK_A: `http://${HOST}/v2/%FF${SENTINELS[0]}`, MAKO_RPC_MOCK_B: urlB },
+    check: (r) => written(r),
+  },
+  {
+    name: 'LAST-LINE GUARD: a SHARED well-formed return carrying part of a credential is refused (exit 5)',
+    mode: 'partial-shared',
+    opts: {},
+    env: both,
+    check: (r) => r.code === 5 && r.resultText === null && clean(r),
+  },
+  {
+    name: 'LAST-LINE GUARD: a bug writing the query credential minus one char is refused (exit 5)',
+    opts: { reintroduceBug: 'partial' },
     env: both,
     check: (r) => r.code === 5 && r.resultText === null && clean(r),
   },
