@@ -3,18 +3,28 @@ pragma solidity 0.8.24;
 
 import {RoundSettlement} from "./RoundSettlement.sol";
 
+interface IERC20 {
+    function transfer(address to, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
+}
+
 /// @title MakoRoundsV1
 /// @notice Creator-hosted scheduled BTC/USD rounds, settled from Chainlink Data Streams reports the
 /// contract verifies on-chain.
 ///
-/// @dev SLICE 1 OF 3, AND DELIBERATELY MONEY-FREE. This slice is the round lifecycle and
-/// permissionless settlement, and it holds no tokens, moves no value and has no entry, claim, refund
-/// payout or treasury path. That isolates the security-critical new trust boundary, a verifier-backed
-/// settlement, from token custody, so the two can be reviewed separately.
+/// @dev SLICES 1 AND 2 OF 3. Slice 1 was the lifecycle and permissionless settlement, deliberately
+/// money-free so the verifier-backed settlement boundary could be reviewed apart from token custody.
+/// Slice 2 adds entry, pools and fee accounting.
 ///
-///   slice 1  lifecycle, scheduling, state transitions, settlement through `RoundSettlement`
-///   slice 2  entry, exact-USDC transfer semantics, pools, fees, conservation
-///   slice 3  claims, refund payouts, treasury withdrawal, reentrancy boundaries
+///   slice 1  lifecycle, scheduling, state transitions, settlement through `RoundSettlement`  DONE
+///   slice 2  entry, exact-USDC transfer semantics, pools, fee accounting, conservation       DONE
+///   slice 3  claims, refund payouts, treasury withdrawal, reentrancy boundaries              TO DO
+///
+/// MONEY COMES IN BUT CANNOT YET GO OUT. Slice 2 takes USDC on `enter` and computes exactly what
+/// every party is owed, but `claim`, `finalizeRefund` and `withdrawTreasury` are slice 3, so nothing
+/// can leave the contract. That is the point of the slice boundary and the reason this is still not
+/// deployable: deploying it would strand every entrant's stake. Slice 3 is not optional polish.
 ///
 /// Nothing here is deployable on its own. `MAX_ACTIVE_ROUNDS` is also provisional until the T0.1c
 /// capacity gate passes at 10 (`SPEC.md` §4).
@@ -60,13 +70,39 @@ contract MakoRoundsV1 {
     /// before deployment.
     uint256 public constant MAX_ACTIVE_ROUNDS = 10;
 
-    /// @notice Protocol fee and rounding-remainder recipient. Unused in slice 1; no value moves.
+    /// @notice Protocol fee and rounding-remainder recipient. Paid in slice 3.
     address public immutable TREASURY;
+
+    /// @notice The only token this contract ever touches. `SPEC.md` §4.
+    /// @dev The same token live V4 uses: 6 decimals, 1,798 bytes of code, runtime keccak256
+    /// `0x96215e60…5a78`, not an ERC-1967 proxy. The deploy script asserts the address AND the code
+    /// hash, per N22, because a pinned address alone does not say what is deployed at it.
+    IERC20 public immutable USDC;
+
+    /// @notice Smallest entry, 0.10 USDC. Six decimals, so 100,000.
+    uint256 public constant MIN_ENTRY = 100_000;
+
+    /// @notice 1% of the total pool, on settled rounds only.
+    uint256 public constant PROTOCOL_FEE_BPS = 100;
+
+    /// @notice 2% of the SMALLER side, on settled rounds only.
+    /// @dev One rate, applied once, no multiplier. No fee formula makes self-filling unprofitable,
+    /// because the thin side carries the better payout. The control is structural instead: one
+    /// address, one side per round. The creator's seed is a bet under the same rules, not a fee.
+    uint256 public constant CREATOR_FEE_BPS = 200;
 
     /// @notice keccak256 of the abi-encoded creator list the constructor was given, so a deployment
     /// receipt can be checked against the addresses that were actually authorised.
     /// @dev Solidity has no immutable arrays, so the authorised set is a constructor-populated
     /// mapping with NO setter anywhere in this contract. This hash is what makes that set auditable.
+    ///
+    /// THE ENCODING IS CANONICAL, which it has to be for the hash to mean anything. The constructor
+    /// requires the list to be STRICTLY ASCENDING, which does three jobs at once: one set has exactly
+    /// one valid encoding, so two deployments of the same creators always produce the same hash;
+    /// duplicates are impossible, since a repeat is not strictly greater; and the list is trivially
+    /// checkable by eye. The zero address is rejected separately. Without this, `keccak256` of a
+    /// reordered list would give a different hash for the same authorised set, and the receipt would
+    /// prove nothing.
     bytes32 public immutable CREATORS_HASH;
 
     mapping(address => bool) private _isCreator;
@@ -108,6 +144,18 @@ contract MakoRoundsV1 {
         NoPrice
     }
 
+    enum Side {
+        None,
+        Up,
+        Down
+    }
+
+    /// @notice One address holds at most one stake per round, on one side. N12.
+    struct Stake {
+        Side side;
+        uint256 amount;
+    }
+
     struct Round {
         address creator;
         uint64 openTime;
@@ -121,7 +169,22 @@ contract MakoRoundsV1 {
         uint32 closeObservedAt;
         bytes32 anchorReportHash;
         bytes32 closeReportHash;
+        // --- slice 2 ---
+        uint256 upPool;
+        uint256 downPool;
+        /// @dev Entrant counts, one address one side, needed by slice 3's rounding remainder: the
+        /// last winner to claim sweeps `distributable - sum(paid)` to the treasury, which requires
+        /// knowing how many winners there are.
+        uint32 upEntrants;
+        uint32 downEntrants;
+        /// @dev Computed once at settlement and stored, so a later claim cannot recompute them from
+        /// state that has since changed. Zero on every refund: refunds pay stake and charge nothing.
+        uint256 protocolFee;
+        uint256 creatorFee;
+        uint256 distributable;
     }
+
+    mapping(uint256 => mapping(address => Stake)) private _stakes;
 
     mapping(uint256 => Round) private _rounds;
 
@@ -171,6 +234,13 @@ contract MakoRoundsV1 {
 
     event RoundRefunded(uint256 indexed roundId, RefundReason reason);
 
+    event Entered(uint256 indexed roundId, address indexed entrant, Side side, uint256 amount, uint256 stakeTotal);
+
+    /// @dev Emitted alongside `RoundSettled` so the accounting is auditable without a state read.
+    event FeesAccrued(
+        uint256 indexed roundId, uint256 total, uint256 protocolFee, uint256 creatorFee, uint256 distributable
+    );
+
     // ---------------------------------------------------------------------------------------------
     // Errors
     // ---------------------------------------------------------------------------------------------
@@ -187,17 +257,37 @@ contract MakoRoundsV1 {
     error SubmitWindowClosed();
     error ObservationInFuture();
     error NoCreators();
+    error ZeroAddress();
+    error CreatorsNotStrictlyAscending();
+    error EntriesClosed();
+    error InvalidSide();
+    error BelowMinimumEntry();
+    error AlreadyOnTheOtherSide();
+    error TransferFailed();
+    error InexactTransfer(uint256 expected, uint256 received);
+    error RoundIsOneSided();
 
     // ---------------------------------------------------------------------------------------------
 
-    constructor(address treasury, address[] memory creators) {
-        if (treasury == address(0)) revert NoCreators();
+    /// @param creators the authorised creator set, STRICTLY ASCENDING and free of the zero address.
+    constructor(address treasury, address usdc, address[] memory creators) {
+        if (treasury == address(0)) revert ZeroAddress();
+        if (usdc == address(0)) revert ZeroAddress();
         if (creators.length == 0) revert NoCreators();
-        TREASURY = treasury;
-        CREATORS_HASH = keccak256(abi.encode(creators));
+
+        address previous = address(0);
         for (uint256 i = 0; i < creators.length; i++) {
-            _isCreator[creators[i]] = true;
+            address c = creators[i];
+            // Strictly greater than the last, so the zero address is excluded by the same comparison
+            // that forbids duplicates and fixes the order. A single rule, three properties.
+            if (uint160(c) <= uint160(previous)) revert CreatorsNotStrictlyAscending();
+            previous = c;
+            _isCreator[c] = true;
         }
+
+        TREASURY = treasury;
+        USDC = IERC20(usdc);
+        CREATORS_HASH = keccak256(abi.encode(creators));
     }
 
     function isCreator(address who) external view returns (bool) {
@@ -266,7 +356,14 @@ contract MakoRoundsV1 {
             anchorObservedAt: 0,
             closeObservedAt: 0,
             anchorReportHash: bytes32(0),
-            closeReportHash: bytes32(0)
+            closeReportHash: bytes32(0),
+            upPool: 0,
+            downPool: 0,
+            upEntrants: 0,
+            downEntrants: 0,
+            protocolFee: 0,
+            creatorFee: 0,
+            distributable: 0
         });
 
         creatorActiveRound[msg.sender] = roundId;
@@ -283,6 +380,74 @@ contract MakoRoundsV1 {
             startTime + DURATION,
             startTime + DURATION + SUBMIT_WINDOW
         );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Entry
+    // ---------------------------------------------------------------------------------------------
+
+    function stakeOf(uint256 roundId, address who) external view returns (Stake memory) {
+        return _stakes[roundId][who];
+    }
+
+    /// @notice Stakes USDC on one side of a round. Anyone, until `entryCloseTime`.
+    ///
+    /// @dev N22, and the reason this is not a plain `transferFrom`: ONLY EXACT USDC IS CREDITED. The
+    /// contract records its own balance, moves the tokens through a safe-call wrapper, and requires
+    /// the balance increase to equal `amount` exactly, BEFORE any state is written. A fee-on-transfer
+    /// token, a rebasing token, or a token that silently moves less all fail here rather than
+    /// crediting a stake the contract does not hold. Tokens arriving any other way are never credited
+    /// to anyone, because only this path writes a stake.
+    ///
+    /// N12, and it is a market-integrity control rather than bookkeeping: one address, one side. No
+    /// fee formula can make a creator self-filling both sides unprofitable, since the thin side
+    /// carries the better payout. Forbidding the same wallet from taking both sides is the control
+    /// that actually bites.
+    function enter(uint256 roundId, Side side, uint256 amount) external {
+        Round storage r = _existing(roundId);
+
+        if (side != Side.Up && side != Side.Down) revert InvalidSide();
+        // Same condition as the one in `_settle`, deliberately written with its own comment so each
+        // can be mutated independently: an identical line in two places is one line to a mutation
+        // runner, and the sweep correctly refused to apply an ambiguous anchor rather than report a
+        // false kill.
+        if (r.status != Status.Active) revert RoundAlreadyTerminal(); // entry guard
+        // N2. Entries stop ENTRY_LEAD before the anchor second exists, so no entrant can have seen
+        // the opening price. Strictly `>=`: the boundary second itself is closed.
+        if (block.timestamp >= r.startTime - ENTRY_LEAD) revert EntriesClosed();
+        if (amount < MIN_ENTRY) revert BelowMinimumEntry();
+
+        Stake storage stake = _stakes[roundId][msg.sender];
+        if (stake.side != Side.None && stake.side != side) revert AlreadyOnTheOtherSide();
+
+        // --- value moves BEFORE any state is written, and is checked exactly -------------------
+        uint256 before = USDC.balanceOf(address(this));
+        _safeTransferFrom(msg.sender, address(this), amount);
+        uint256 received = USDC.balanceOf(address(this)) - before;
+        if (received != amount) revert InexactTransfer(amount, received);
+
+        if (stake.side == Side.None) {
+            stake.side = side;
+            if (side == Side.Up) r.upEntrants++;
+            else r.downEntrants++;
+        }
+        stake.amount += amount;
+
+        if (side == Side.Up) r.upPool += amount;
+        else r.downPool += amount;
+
+        emit Entered(roundId, msg.sender, side, amount, stake.amount);
+    }
+
+    /// @dev A call that reverts, returns `false`, or returns malformed data fails. A call that
+    /// returns nothing is accepted here and caught by the balance check instead, which is what makes
+    /// a no-return legacy token usable without trusting it.
+    function _safeTransferFrom(address from, address to, uint256 amount) private {
+        (bool ok, bytes memory data) = address(USDC).call(abi.encodeCall(IERC20.transferFrom, (from, to, amount)));
+        if (!ok) revert TransferFailed();
+        // Length is checked explicitly rather than left to `abi.decode` to panic on, so a malformed
+        // return fails with this contract's own error instead of a bare Panic.
+        if (data.length != 0 && (data.length != 32 || !abi.decode(data, (bool)))) revert TransferFailed();
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -306,12 +471,24 @@ contract MakoRoundsV1 {
         Round storage r = _existing(roundId);
 
         // --- round-level guards, none of which the library can make ---------------------------
-        if (r.status != Status.Active) revert RoundAlreadyTerminal();
+        if (r.status != Status.Active) revert RoundAlreadyTerminal(); // settlement guard
 
         uint64 closeTime = r.startTime + DURATION;
         if (block.timestamp < closeTime) revert TooEarlyToSettle();
         // N13: settle and finalizeRefund(NoPrice) windows never overlap.
         if (block.timestamp >= closeTime + SUBMIT_WINDOW) revert SubmitWindowClosed();
+
+        // `SPEC.md:135`: a one-sided round is OneSided (§6) and must NEVER settle, whatever the
+        // price (N3). Slice 1 named this line and could not write it, having no pools.
+        //
+        // It is also what closes the only race worth worrying about between `settle` and
+        // `finalizeRefund`. `finalizeRefund(OneSided)` is available from `entryCloseTime`, which
+        // overlaps the settle window, so without this both could apply to one round at one moment.
+        // With it they are mutually exclusive BY THEIR OWN CONDITIONS rather than by who calls
+        // first: a one-sided round cannot settle, and a two-sided round cannot refund as OneSided.
+        // `finalizeRefund(NoPrice)` starts at `submitDeadline`, where the guard above has already
+        // closed settlement, so those two are disjoint in time instead.
+        if (r.upPool == 0 || r.downPool == 0) revert RoundIsOneSided();
 
         // --- the rule, once per report, at ITS OWN boundary -------------------------------------
         // Passing the boundaries here is what ties a report to this round. The library checks that
@@ -343,8 +520,9 @@ contract MakoRoundsV1 {
         _releaseSlot(r);
 
         if (close.price == anchor.price) {
-            // A tie refunds. In slice 1 that is a state transition and an event; the payout path is
-            // slice 3.
+            // A tie refunds, and a refund charges NOTHING: every entrant receives exactly their
+            // stake, so `protocolFee`, `creatorFee` and `distributable` all stay zero and
+            // `sum(refunds) == total` by construction. The payout path is slice 3.
             r.status = Status.Refunded;
             r.refundReason = RefundReason.Tie;
             emit RoundRefunded(roundId, RefundReason.Tie);
@@ -354,6 +532,22 @@ contract MakoRoundsV1 {
         Outcome outcome = close.price > anchor.price ? Outcome.Up : Outcome.Down;
         r.status = Status.Settled;
         r.outcome = outcome;
+
+        // --- fees, computed ONCE and stored, SPEC §7 -------------------------------------------
+        // Stored rather than recomputed on each claim, so a later claim cannot derive a different
+        // answer from state that has moved. Both floors, so neither fee can exceed its base, and
+        // `distributable` absorbs the truncation. The rounding remainder inside `distributable` is
+        // swept to the treasury by the last winner to claim, in slice 3.
+        uint256 total = r.upPool + r.downPool;
+        uint256 smaller = r.upPool < r.downPool ? r.upPool : r.downPool;
+        uint256 protocolFee = (total * PROTOCOL_FEE_BPS) / 10_000;
+        uint256 creatorFee = (smaller * CREATOR_FEE_BPS) / 10_000;
+
+        r.protocolFee = protocolFee;
+        r.creatorFee = creatorFee;
+        r.distributable = total - protocolFee - creatorFee;
+
+        emit FeesAccrued(roundId, total, protocolFee, creatorFee, r.distributable);
 
         emit RoundSettled(
             roundId,

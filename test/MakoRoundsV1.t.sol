@@ -5,6 +5,15 @@ import {Test} from "forge-std/Test.sol";
 import {MakoRoundsV1} from "../src/MakoRoundsV1.sol";
 import {RoundSettlement} from "../src/RoundSettlement.sol";
 import {MockVerifier} from "./mocks/MockVerifier.sol";
+import {
+    MockUSDC,
+    NoReturnUSDC,
+    FalseReturnUSDC,
+    RevertingUSDC,
+    FeeOnTransferUSDC,
+    MalformedReturnUSDC,
+    OvershootUSDC
+} from "./mocks/TokenMocks.sol";
 
 /// @notice Slice 1: the round lifecycle and permissionless settlement. No money anywhere.
 ///
@@ -15,6 +24,10 @@ import {MockVerifier} from "./mocks/MockVerifier.sol";
 contract MakoRoundsV1Test is Test {
     MakoRoundsV1 internal rounds;
     MockVerifier internal mock;
+    MockUSDC internal usdc;
+
+    address internal alice = address(0xA11CE);
+    address internal bob = address(0xB0B);
 
     address internal constant VERIFIER = 0x72790f9eB82db492a7DDb6d2af22A270Dcc3Db64;
     address internal constant TREASURY = address(0x7777);
@@ -29,12 +42,23 @@ contract MakoRoundsV1Test is Test {
     uint64 internal submitDeadline;
     uint256 internal roundId;
 
+    uint256 internal constant MAX_CREATORS = 11;
+
     function setUp() public {
         vm.warp(BASE);
 
+        usdc = new MockUSDC();
+
         address[] memory creators = new address[](1);
         creators[0] = creator;
-        rounds = new MakoRoundsV1(TREASURY, creators);
+        rounds = new MakoRoundsV1(TREASURY, address(usdc), creators);
+
+        address[3] memory funded = [alice, bob, creator];
+        for (uint256 i = 0; i < funded.length; i++) {
+            usdc.mint(funded[i], 1_000_000_000);
+            vm.prank(funded[i]);
+            usdc.approve(address(rounds), type(uint256).max);
+        }
 
         MockVerifier template = new MockVerifier();
         vm.etch(VERIFIER, address(template).code);
@@ -82,10 +106,25 @@ contract MakoRoundsV1Test is Test {
     }
 
     /// @dev Arms both reports at their correct boundaries and warps to a settleable moment.
+    /// @dev It also makes the round TWO-SIDED, because `SPEC.md:135` forbids settling a one-sided
+    /// round at all. Every settlement test therefore needs both pools funded, which is itself worth
+    /// noticing: after slice 2, "can this round settle" is no longer a question about reports alone.
     function _armHappyPath(int192 anchorPrice, int192 closePrice) internal {
+        _twoSided();
         _arm(_anchorBytes(), uint32(startTime), anchorPrice);
         _arm(_closeBytes(), uint32(closeTime), closePrice);
         vm.warp(closeTime);
+    }
+
+    /// @dev Funds both sides of the round created in `setUp`, while entries are still open.
+    function _twoSided() internal {
+        uint256 t = block.timestamp;
+        vm.warp(BASE);
+        vm.prank(alice);
+        rounds.enter(roundId, MakoRoundsV1.Side.Up, 10_000_000);
+        vm.prank(bob);
+        rounds.enter(roundId, MakoRoundsV1.Side.Down, 30_000_000);
+        vm.warp(t);
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -117,7 +156,7 @@ contract MakoRoundsV1Test is Test {
         // creator for these.
         address[] memory two = new address[](1);
         two[0] = outsider;
-        MakoRoundsV1 fresh = new MakoRoundsV1(TREASURY, two);
+        MakoRoundsV1 fresh = new MakoRoundsV1(TREASURY, address(usdc), two);
 
         uint64 minOk = uint64(block.timestamp) + 600;
         minOk = minOk + (60 - (minOk % 60)) % 60; // round up to a minute
@@ -142,7 +181,7 @@ contract MakoRoundsV1Test is Test {
         for (uint256 i = 0; i < 11; i++) {
             many[i] = address(uint160(0x1000 + i));
         }
-        MakoRoundsV1 fresh = new MakoRoundsV1(TREASURY, many);
+        MakoRoundsV1 fresh = new MakoRoundsV1(TREASURY, address(usdc), many);
 
         for (uint256 i = 0; i < 10; i++) {
             vm.prank(many[i]);
@@ -196,6 +235,7 @@ contract MakoRoundsV1Test is Test {
     /// @notice N25: the anchor's boundary is `startTime`, which is `ENTRY_LEAD` after the last
     /// possible entry, so no entrant can have seen it.
     function test_AnchorSecondIsStartTime() public {
+        _twoSided(); // SPEC.md:135 forbids settling a one-sided round at all
         assertEq(rounds.entryCloseTimeOf(roundId) + 60, startTime, "entries do not stop ENTRY_LEAD early");
 
         // A report observed one second either side of startTime is not this round's anchor.
@@ -221,6 +261,7 @@ contract MakoRoundsV1Test is Test {
     }
 
     function test_CloseSecondIsCloseTime() public {
+        _twoSided(); // SPEC.md:135 forbids settling a one-sided round at all
         _arm(_anchorBytes(), uint32(startTime), 100e18);
         _arm(_closeBytes(), uint32(closeTime) + 1, 101e18);
         vm.warp(closeTime + 1);
@@ -233,6 +274,7 @@ contract MakoRoundsV1Test is Test {
     // ---------------------------------------------------------------------------------------------
 
     function test_SettleRevertsBeforeCloseTime() public {
+        _twoSided(); // SPEC.md:135 forbids settling a one-sided round at all
         _arm(_anchorBytes(), uint32(startTime), 100e18);
         _arm(_closeBytes(), uint32(closeTime), 101e18);
 
@@ -248,6 +290,7 @@ contract MakoRoundsV1Test is Test {
     /// @notice N13: `settle` reverts at or after `submitDeadline`, so the settle and NoPrice-refund
     /// windows never overlap.
     function test_SettleAndRefundWindowsDisjoint() public {
+        _twoSided(); // SPEC.md:135 forbids settling a one-sided round at all
         _arm(_anchorBytes(), uint32(startTime), 100e18);
         _arm(_closeBytes(), uint32(closeTime), 101e18);
 
@@ -292,6 +335,7 @@ contract MakoRoundsV1Test is Test {
     /// The guard is asserted directly rather than only implied by the timing guards, so it survives
     /// a later change to them.
     function test_ReportObservedInTheFutureIsRejected() public {
+        _twoSided(); // SPEC.md:135 forbids settling a one-sided round at all
         // Settle-time guards satisfied, but the close report claims an observation after `now`.
         // The boundary check fires first, which is itself the point: the two together make a
         // future observation unreachable. Assert the ordering explicitly.
@@ -418,12 +462,361 @@ contract MakoRoundsV1Test is Test {
     }
 
     // ---------------------------------------------------------------------------------------------
+    // the creator set, and its hash meaning something
+    // ---------------------------------------------------------------------------------------------
+
+    function _creators(address a, address b) internal pure returns (address[] memory out) {
+        out = new address[](2);
+        out[0] = a;
+        out[1] = b;
+    }
+
+    function test_ConstructorRejectsZeroTreasury() public {
+        address[] memory one = new address[](1);
+        one[0] = creator;
+        vm.expectRevert(MakoRoundsV1.ZeroAddress.selector);
+        new MakoRoundsV1(address(0), address(usdc), one);
+    }
+
+    function test_ConstructorRejectsAnEmptyCreatorSet() public {
+        vm.expectRevert(MakoRoundsV1.NoCreators.selector);
+        new MakoRoundsV1(TREASURY, address(usdc), new address[](0));
+    }
+
+    /// @dev The zero address is excluded by the same strictly-greater comparison that forbids
+    /// duplicates, since nothing is strictly greater than nothing at the start of the list.
+    function test_ConstructorRejectsTheZeroAddressAsACreator() public {
+        vm.expectRevert(MakoRoundsV1.CreatorsNotStrictlyAscending.selector);
+        new MakoRoundsV1(TREASURY, address(usdc), _creators(address(0), address(0x2222)));
+    }
+
+    function test_ConstructorRejectsDuplicateCreators() public {
+        vm.expectRevert(MakoRoundsV1.CreatorsNotStrictlyAscending.selector);
+        new MakoRoundsV1(TREASURY, address(usdc), _creators(address(0x2222), address(0x2222)));
+    }
+
+    function test_ConstructorRejectsAnUnsortedCreatorSet() public {
+        vm.expectRevert(MakoRoundsV1.CreatorsNotStrictlyAscending.selector);
+        new MakoRoundsV1(TREASURY, address(usdc), _creators(address(0x3333), address(0x2222)));
+    }
+
+    /// @notice One authorised set has exactly one valid encoding, so its hash is canonical.
+    /// @dev Without the ordering rule the same two creators in the other order would deploy fine and
+    /// produce a DIFFERENT `CREATORS_HASH`, and a deployment receipt checked against that hash would
+    /// prove nothing about which addresses were authorised.
+    function test_CreatorsHashIsCanonicalForASet() public {
+        address lo = address(0x2222);
+        address hi = address(0x3333);
+
+        MakoRoundsV1 a = new MakoRoundsV1(TREASURY, address(usdc), _creators(lo, hi));
+        MakoRoundsV1 b = new MakoRoundsV1(TREASURY, address(usdc), _creators(lo, hi));
+        assertEq(a.CREATORS_HASH(), b.CREATORS_HASH(), "the same set must hash the same");
+
+        // The only other ordering of that set does not deploy at all, so no second hash exists.
+        vm.expectRevert(MakoRoundsV1.CreatorsNotStrictlyAscending.selector);
+        new MakoRoundsV1(TREASURY, address(usdc), _creators(hi, lo));
+
+        assertTrue(a.isCreator(lo) && a.isCreator(hi));
+        assertFalse(a.isCreator(outsider));
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // capacity, as an operational constraint rather than a comment
+    // ---------------------------------------------------------------------------------------------
+
+    /// @notice Rounds that pass `submitDeadline` unsettled HOLD THEIR CAPACITY SLOTS, and with
+    /// `MAX_ACTIVE_ROUNDS` of them nobody can schedule anything.
+    ///
+    /// @dev This is a real operational constraint, not a documentation note, so it is demonstrated
+    /// rather than asserted in a comment. `finalizeRefund` (slice 3) is what frees a slot, and it is
+    /// permissionless, so anyone can unblock the contract by spending the gas. Until slice 3 exists
+    /// there is no way out at all, which is one reason slice 1 is not deployable on its own.
+    ///
+    /// It also bounds the damage: the cost of blocking scheduling is holding all
+    /// `MAX_ACTIVE_ROUNDS` slots, and only the invited `CREATORS` can take a slot in the first place,
+    /// so this is not open to the public. That is why the cap being provisional until T0.1c matters
+    /// beyond throughput: it is also the size of this constraint.
+    function test_StuckRoundsHoldCapacityUntilSomeoneRefundsThem() public {
+        address[] memory many = new address[](MAX_CREATORS);
+        for (uint256 i = 0; i < MAX_CREATORS; i++) {
+            many[i] = address(uint160(0x2000 + i)); // strictly ascending
+        }
+        MakoRoundsV1 fresh = new MakoRoundsV1(TREASURY, address(usdc), many);
+
+        uint64 st = BASE + 3600;
+        for (uint256 i = 0; i < 10; i++) {
+            vm.prank(many[i]);
+            fresh.schedule(st + uint64(i) * 60);
+        }
+        assertEq(fresh.activeRoundCount(), 10);
+
+        // Every round sails past its submit deadline with nobody settling it.
+        vm.warp(st + 10 * 60 + 900 + 24 hours + 1);
+
+        // None of them can settle any more, so none of them can free its slot this way.
+        vm.expectRevert(MakoRoundsV1.SubmitWindowClosed.selector);
+        fresh.settle(1, _anchorBytes(), _closeBytes());
+
+        // And scheduling is blocked for everyone, including the eleventh creator who did nothing.
+        vm.prank(many[10]);
+        vm.expectRevert(MakoRoundsV1.TooManyActiveRounds.selector);
+        fresh.schedule(uint64(block.timestamp) + 3600 - (uint64(block.timestamp) + 3600) % 60 + 60);
+
+        assertEq(fresh.activeRoundCount(), 10, "slots are still held");
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // slice 2: entry
+    // ---------------------------------------------------------------------------------------------
+
+    function test_EntryRecordsStakeAndPool() public {
+        vm.prank(alice);
+        rounds.enter(roundId, MakoRoundsV1.Side.Up, 5_000_000);
+
+        MakoRoundsV1.Stake memory st = rounds.stakeOf(roundId, alice);
+        assertEq(uint256(st.side), uint256(MakoRoundsV1.Side.Up));
+        assertEq(st.amount, 5_000_000);
+
+        MakoRoundsV1.Round memory r = rounds.roundOf(roundId);
+        assertEq(r.upPool, 5_000_000);
+        assertEq(r.downPool, 0);
+        assertEq(r.upEntrants, 1);
+        assertEq(usdc.balanceOf(address(rounds)), 5_000_000, "the contract holds exactly the stake");
+    }
+
+    function test_TopUpOnTheSameSideAddsAndDoesNotDoubleCountTheEntrant() public {
+        vm.startPrank(alice);
+        rounds.enter(roundId, MakoRoundsV1.Side.Up, 5_000_000);
+        rounds.enter(roundId, MakoRoundsV1.Side.Up, 3_000_000);
+        vm.stopPrank();
+
+        assertEq(rounds.stakeOf(roundId, alice).amount, 8_000_000);
+        MakoRoundsV1.Round memory r = rounds.roundOf(roundId);
+        assertEq(r.upPool, 8_000_000);
+        assertEq(r.upEntrants, 1, "one address is one entrant however many times they top up");
+    }
+
+    /// @notice N12: a wallet that has entered one side cannot enter the other.
+    /// @dev This is the structural control that makes creator self-filling pointless. No fee formula
+    /// can do it, because the thin side carries the better payout, so the rule has to be on the
+    /// wallet rather than on the price. V4 permits both sides; this deliberately does not inherit it.
+    function test_OneAddressOneSide() public {
+        vm.prank(alice);
+        rounds.enter(roundId, MakoRoundsV1.Side.Up, 5_000_000);
+
+        vm.prank(alice);
+        vm.expectRevert(MakoRoundsV1.AlreadyOnTheOtherSide.selector);
+        rounds.enter(roundId, MakoRoundsV1.Side.Down, 5_000_000);
+    }
+
+    /// @notice N2: entries revert at or after `entryCloseTime`, asserted at the boundary +/- 1.
+    function test_EntryRevertsAtEntryClose() public {
+        uint64 entryClose = startTime - 60;
+
+        vm.warp(entryClose - 1);
+        vm.prank(alice);
+        rounds.enter(roundId, MakoRoundsV1.Side.Up, 1_000_000);
+
+        vm.warp(entryClose);
+        vm.prank(bob);
+        vm.expectRevert(MakoRoundsV1.EntriesClosed.selector);
+        rounds.enter(roundId, MakoRoundsV1.Side.Down, 1_000_000);
+    }
+
+    function test_EntryBelowTheMinimumReverts() public {
+        vm.prank(alice);
+        vm.expectRevert(MakoRoundsV1.BelowMinimumEntry.selector);
+        rounds.enter(roundId, MakoRoundsV1.Side.Up, 99_999);
+
+        vm.prank(alice);
+        rounds.enter(roundId, MakoRoundsV1.Side.Up, 100_000);
+    }
+
+    function test_EntryWithNoSideReverts() public {
+        vm.prank(alice);
+        vm.expectRevert(MakoRoundsV1.InvalidSide.selector);
+        rounds.enter(roundId, MakoRoundsV1.Side.None, 1_000_000);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // slice 2: N22, only exact USDC is credited
+    // ---------------------------------------------------------------------------------------------
+
+    function _roundsWith(MockUSDC token) internal returns (MakoRoundsV1 rr, uint256 id) {
+        address[] memory cs = new address[](1);
+        cs[0] = creator;
+        rr = new MakoRoundsV1(TREASURY, address(token), cs);
+        vm.prank(creator);
+        id = rr.schedule(startTime);
+        token.mint(alice, 1_000_000_000);
+        vm.prank(alice);
+        token.approve(address(rr), type(uint256).max);
+    }
+
+    /// @notice A token that takes a cut in transit must revert, not credit the full amount.
+    /// @dev Without the exact-balance check the entrant is credited with what they asked for while
+    /// the contract holds less, and the shortfall surfaces much later as a claim that cannot be paid.
+    function test_FeeOnTransferTokenReverts() public {
+        (MakoRoundsV1 rr, uint256 id) = _roundsWith(MockUSDC(address(new FeeOnTransferUSDC())));
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(MakoRoundsV1.InexactTransfer.selector, 1_000_000, 990_000));
+        rr.enter(id, MakoRoundsV1.Side.Up, 1_000_000);
+    }
+
+    /// @notice And a token that credits MORE also reverts, which is why the check is `==` not `>=`.
+    function test_OvershootingTokenReverts() public {
+        (MakoRoundsV1 rr, uint256 id) = _roundsWith(MockUSDC(address(new OvershootUSDC())));
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(MakoRoundsV1.InexactTransfer.selector, 1_000_000, 1_000_001));
+        rr.enter(id, MakoRoundsV1.Side.Up, 1_000_000);
+    }
+
+    function test_FalseReturningTokenReverts() public {
+        (MakoRoundsV1 rr, uint256 id) = _roundsWith(MockUSDC(address(new FalseReturnUSDC())));
+        vm.prank(alice);
+        vm.expectRevert(MakoRoundsV1.TransferFailed.selector);
+        rr.enter(id, MakoRoundsV1.Side.Up, 1_000_000);
+    }
+
+    function test_RevertingTokenReverts() public {
+        (MakoRoundsV1 rr, uint256 id) = _roundsWith(MockUSDC(address(new RevertingUSDC())));
+        vm.prank(alice);
+        vm.expectRevert(MakoRoundsV1.TransferFailed.selector);
+        rr.enter(id, MakoRoundsV1.Side.Up, 1_000_000);
+    }
+
+    /// @notice A malformed return fails with this contract's own error, not a bare decode panic.
+    function test_MalformedReturnTokenReverts() public {
+        (MakoRoundsV1 rr, uint256 id) = _roundsWith(MockUSDC(address(new MalformedReturnUSDC())));
+        vm.prank(alice);
+        vm.expectRevert(MakoRoundsV1.TransferFailed.selector);
+        rr.enter(id, MakoRoundsV1.Side.Up, 1_000_000);
+    }
+
+    /// @notice A legacy token that returns nothing is ACCEPTED, because the balance check is what
+    /// makes it safe rather than the return value.
+    function test_NoReturnTokenIsAccepted() public {
+        (MakoRoundsV1 rr, uint256 id) = _roundsWith(MockUSDC(address(new NoReturnUSDC())));
+        vm.prank(alice);
+        rr.enter(id, MakoRoundsV1.Side.Up, 1_000_000);
+        assertEq(rr.stakeOf(id, alice).amount, 1_000_000);
+    }
+
+    /// @notice Tokens sent to the contract any other way are never credited to anyone.
+    function test_StrayTransfersAreNeverCredited() public {
+        usdc.mint(address(this), 50_000_000);
+        usdc.transfer(address(rounds), 50_000_000);
+
+        assertEq(usdc.balanceOf(address(rounds)), 50_000_000, "the tokens really did arrive");
+        assertEq(rounds.roundOf(roundId).upPool, 0, "but no pool grew");
+        assertEq(rounds.stakeOf(roundId, address(this)).amount, 0, "and nobody was credited");
+
+        // And a later genuine entry still credits only its own amount.
+        vm.prank(alice);
+        rounds.enter(roundId, MakoRoundsV1.Side.Up, 1_000_000);
+        assertEq(rounds.roundOf(roundId).upPool, 1_000_000);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // slice 2: fees and conservation
+    // ---------------------------------------------------------------------------------------------
+
+    /// @notice A one-sided round can never settle, whatever the price. N3, SPEC.md:135.
+    function test_OneSidedRoundCannotSettle() public {
+        vm.prank(alice);
+        rounds.enter(roundId, MakoRoundsV1.Side.Up, 10_000_000);
+
+        _arm(_anchorBytes(), uint32(startTime), 100e18);
+        _arm(_closeBytes(), uint32(closeTime), 101e18);
+        vm.warp(closeTime);
+
+        vm.expectRevert(MakoRoundsV1.RoundIsOneSided.selector);
+        rounds.settle(roundId, _anchorBytes(), _closeBytes());
+    }
+
+    /// @notice SPEC §7: protocol fee on the total, creator fee on the SMALLER side, both floored.
+    function test_FeesFollowTheSpecFormula() public {
+        _armHappyPath(100e18, 101e18); // up 10 USDC, down 30 USDC
+        rounds.settle(roundId, _anchorBytes(), _closeBytes());
+
+        MakoRoundsV1.Round memory r = rounds.roundOf(roundId);
+        uint256 total = 40_000_000;
+        uint256 smaller = 10_000_000;
+        assertEq(r.protocolFee, total * 100 / 10_000, "1% of the total");
+        assertEq(r.creatorFee, smaller * 200 / 10_000, "2% of the smaller side");
+        assertEq(r.distributable, total - r.protocolFee - r.creatorFee);
+    }
+
+    /// @notice Nothing is created or destroyed: fees plus distributable equal the pot exactly.
+    function testFuzz_SettlementConservesTheTotal(uint96 upAmount, uint96 downAmount) public {
+        uint256 up = uint256(upAmount) % 1_000_000_000 + 100_000;
+        uint256 down = uint256(downAmount) % 1_000_000_000 + 100_000;
+
+        usdc.mint(alice, up);
+        usdc.mint(bob, down);
+        vm.prank(alice);
+        rounds.enter(roundId, MakoRoundsV1.Side.Up, up);
+        vm.prank(bob);
+        rounds.enter(roundId, MakoRoundsV1.Side.Down, down);
+
+        _arm(_anchorBytes(), uint32(startTime), 100e18);
+        _arm(_closeBytes(), uint32(closeTime), 101e18);
+        vm.warp(closeTime);
+        rounds.settle(roundId, _anchorBytes(), _closeBytes());
+
+        MakoRoundsV1.Round memory r = rounds.roundOf(roundId);
+        assertEq(r.upPool + r.downPool, up + down, "pools must equal what was paid in");
+        assertEq(
+            r.protocolFee + r.creatorFee + r.distributable,
+            up + down,
+            "fees plus distributable must equal the total exactly"
+        );
+        assertEq(usdc.balanceOf(address(rounds)), up + down, "and the contract holds all of it");
+    }
+
+    /// @notice A refund charges nothing: no fee is accrued and the whole pot stays distributable to
+    /// its owners. `sum(refunds) == total`.
+    function test_ARefundChargesNoFees() public {
+        _armHappyPath(100e18, 100e18); // a tie
+        rounds.settle(roundId, _anchorBytes(), _closeBytes());
+
+        MakoRoundsV1.Round memory r = rounds.roundOf(roundId);
+        assertEq(uint256(r.refundReason), uint256(MakoRoundsV1.RefundReason.Tie));
+        assertEq(r.protocolFee, 0, "a refund charges no protocol fee");
+        assertEq(r.creatorFee, 0, "a refund charges no creator fee");
+        assertEq(usdc.balanceOf(address(rounds)), r.upPool + r.downPool, "the whole pot is still here");
+    }
+
+    function test_EntryIntoATerminalRoundReverts() public {
+        _armHappyPath(100e18, 101e18);
+        rounds.settle(roundId, _anchorBytes(), _closeBytes());
+
+        vm.warp(BASE);
+        vm.prank(alice);
+        vm.expectRevert(MakoRoundsV1.RoundAlreadyTerminal.selector);
+        rounds.enter(roundId, MakoRoundsV1.Side.Up, 1_000_000);
+    }
+
+    // ---------------------------------------------------------------------------------------------
     // slice boundary
     // ---------------------------------------------------------------------------------------------
 
-    /// @notice Slice 1 holds no value and has no money path. Asserted so the boundary is a test
-    /// rather than a claim in a comment.
-    function test_SliceOneHoldsNoValue() public view {
+    /// @notice Money can come IN but has no way OUT until slice 3.
+    /// @dev Asserted so the boundary is a test rather than a claim in a comment, and so the
+    /// consequence is unmissable: deploying this as it stands would strand every entrant's stake.
+    /// Slice 3 is not optional polish.
+    function test_ValueCanEnterButNotLeaveUntilSliceThree() public {
+        vm.prank(alice);
+        rounds.enter(roundId, MakoRoundsV1.Side.Up, 10_000_000);
+        assertEq(usdc.balanceOf(address(rounds)), 10_000_000);
+
+        // No claim, no refund payout, no treasury withdrawal exists yet. The only selectors that
+        // move USDC are the ones slice 3 adds, so the balance cannot fall.
+        _arm(_anchorBytes(), uint32(startTime), 100e18);
+        vm.warp(closeTime + 1);
+        assertEq(usdc.balanceOf(address(rounds)), 10_000_000, "nothing can leave");
+
+        // Native value was never accepted either: there is no payable function at all.
         assertEq(address(rounds).balance, 0);
     }
 }

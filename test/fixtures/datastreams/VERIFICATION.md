@@ -195,8 +195,8 @@ Every mutation runs on a copy in a temp directory. `git checkout` is never used,
 about undoing uncommitted work, and both runners assert the working-tree file is byte-identical to
 where it started.
 
-**Solidity: 28 mutations, 28 killed, 0 survived.** Every one caught at RUNTIME by a
-named test, not by failing to compile.
+**Solidity: 42 mutations, 42 killed, 0 survived.** Every one caught at RUNTIME by a
+named test, none merely by failing to compile. Run 2026-09-24 against slices 1 and 2.
 
 ### `src/RoundSettlement.sol` (15 mutations)
 
@@ -218,32 +218,51 @@ named test, not by failing to compile.
 | step 7 | delete the expiry check | `test_LibraryAgreesWithTheCorpusOnEveryMockRow` |
 | step 3 | decode the SUBMITTED bytes instead of the verified return | `test_LibraryAgreesWithTheCorpusOnEveryMockRow` |
 
-### `src/MakoRoundsV1.sol`, slice 1 (13 mutations)
+### `src/MakoRoundsV1.sol`, slices 1 and 2 (27 mutations)
 
-The round-level guards the library deliberately cannot make.
+The round-level guards the library cannot make, plus entry, exact-token semantics and fee accounting.
 
 | Clause | Mutation | Killed by |
 |---|---|---|
 | SPEC 3 lifecycle | allow settlement before closeTime | `test_SettleRevertsBeforeCloseTime` |
-| N13 | allow settlement at or after submitDeadline | `test_SettleAndRefundWindowsDisjoint` |
+| N13 | allow settlement at or after submitDeadline | `test_SettleAndRefundWindowsDisjoint`, `test_StuckRoundsHoldCapacityUntilSomeoneRefundsThem` |
 | SPEC 3 terminal states | allow a round to settle twice | `test_ARefundedRoundCannotThenSettle`, `test_RoundSettlesAtMostOnce` |
-| N25 | check the anchor against closeTime instead of startTime | `test_ARefundedRoundCannotThenSettle`, `test_EqualPricesRefundAsTie`, `test_OutcomeDownWhenCloseIsLower`, `test_OutcomeUpWhenCloseIsHigher`, … |
-| N1 | check the close against startTime instead of closeTime | `test_ARefundedRoundCannotThenSettle`, `test_EqualPricesRefundAsTie`, `test_OutcomeDownWhenCloseIsLower`, `test_OutcomeUpWhenCloseIsHigher`, … |
+| N25 | check the anchor against closeTime instead of startTime | `test_ARefundChargesNoFees`, `test_ARefundedRoundCannotThenSettle`, `test_AnchorSecondIsStartTime`, +10 more |
+| N1 | check the close against startTime instead of closeTime | `test_ARefundChargesNoFees`, `test_ARefundedRoundCannotThenSettle`, `test_EntryIntoATerminalRoundReverts`, +9 more |
 | SPEC 5.3 | invert the outcome direction | `test_OutcomeDownWhenCloseIsLower`, `test_OutcomeUpWhenCloseIsHigher`, `test_SettlementEmitsEvidence` |
-| SPEC 5.3 | settle a tie as UP instead of refunding | `test_ARefundedRoundCannotThenSettle`, `test_EqualPricesRefundAsTie` |
+| SPEC 5.3 | settle a tie as UP instead of refunding | `test_ARefundChargesNoFees`, `test_ARefundedRoundCannotThenSettle`, `test_EqualPricesRefundAsTie` |
 | N27 | drop the whole-minute boundary requirement | `test_StartTimeOnMinute` |
 | SPEC 8 | drop the creator allowlist | `test_OnlyCreatorsMaySchedule` |
 | SPEC 4 | drop the per-creator active-round limit | `test_OneNonTerminalRoundPerCreator` |
-| SPEC 4, MAX_ACTIVE_ROUNDS | drop the global active-round cap | `test_GlobalActiveRoundCapIsEnforced` |
+| SPEC 4, MAX_ACTIVE_ROUNDS | drop the global active-round cap | `test_GlobalActiveRoundCapIsEnforced`, `test_StuckRoundsHoldCapacityUntilSomeoneRefundsThem` |
 | SPEC 4, MIN_LEAD | drop the minimum scheduling lead | `test_LeadBoundsAreEnforcedAtTheBoundaryPlusMinusOne` |
 | N2, N25 | lock entries at startTime instead of ENTRY_LEAD before it | `test_PhasesFollowTheClockWithoutATransaction` |
+| CREATORS_HASH canonicality | drop the strictly-ascending creator rule | `test_ConstructorRejectsAnUnsortedCreatorSet`, `test_ConstructorRejectsDuplicateCreators`, `test_ConstructorRejectsTheZeroAddressAsACreator`, +1 more |
+| SPEC 4, TREASURY | accept a zero treasury | `test_ConstructorRejectsZeroTreasury` |
+| SPEC 8 | accept an empty creator set | `test_ConstructorRejectsAnEmptyCreatorSet` |
+| SPEC 3 terminal states | allow entry into a terminal round | `test_EntryIntoATerminalRoundReverts` |
+| N2, N25 | allow entry at or after entryCloseTime | `test_EntryRevertsAtEntryClose` |
+| SPEC 4, MIN_ENTRY | drop the minimum entry | `test_EntryBelowTheMinimumReverts` |
+| N12 | let one address take both sides | `test_OneAddressOneSide` |
+| N22 | credit the requested amount rather than what arrived | `test_FeeOnTransferTokenReverts`, `test_OvershootingTokenReverts` |
+| N22 | accept >= instead of == on the balance delta | `test_OvershootingTokenReverts` |
+| N22 | ignore a false or malformed transfer return | `test_MalformedReturnTokenReverts` |
+| N3, SPEC 5.2 per-submission, SPEC.md:135 | allow a one-sided round to settle | `test_OneSidedRoundCannotSettle` |
+| SPEC 7 | charge the protocol fee on the smaller side instead of the total | `test_FeesFollowTheSpecFormula` |
+| SPEC 7 | charge the creator fee on the total instead of the smaller side | `test_FeesFollowTheSpecFormula` |
+| SPEC 7 conservation | leave the fees inside distributable | `test_FeesFollowTheSpecFormula` |
 
-**What the run found beyond the count.** The mutation that swaps the anchor's boundary to
-`closeTime` was killed by nine unrelated tests and NOT by `test_AnchorSecondIsStartTime`, the test
-named for that property: it armed the anchor at `startTime ± 1`, which is not `closeTime` either, so
-it reverted and passed regardless. A test that cannot fail for the reason it exists is not testing
-that reason. The test now also arms the anchor at `closeTime` and, re-run against that mutation
-alone, kills it by itself.
+**What the runs found beyond the counts.**
+
+- The mutation swapping the anchor's boundary to `closeTime` was at first killed only by unrelated tests, never
+  by `test_AnchorSecondIsStartTime`, which armed the anchor at `startTime ± 1` and so passed regardless. The
+  test now also arms the anchor at `closeTime` and kills that mutation on its own.
+- One sweep reported a mutation SKIPPED because its anchor matched twice after `enter` reused the settlement
+  guard's exact line. The runner refused to apply an ambiguous mutation rather than report a false kill. The
+  two guards are now distinguishable and each has its own mutation.
+- One sweep's `KILLED_AT_COMPILE` results were void because the source was edited while it ran, so its temp
+  copies picked up half-finished code. It was discarded and re-run with no concurrent edits. This table is
+  from the clean run.
 
 ---
 
