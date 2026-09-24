@@ -209,13 +209,19 @@ contract MakoRoundsV1 {
     /// @notice Ids start at 1, so zero means "no round".
     uint256 public roundCount;
 
-    /// @notice How many rounds are non-terminal. Incremented by `schedule`, decremented by a
-    /// terminal transition.
-    /// @dev A round that passes `submitDeadline` without settling stays non-terminal, and therefore
-    /// holds a slot, until someone calls `finalizeRefund` (slice 3). That call is permissionless and
-    /// the creator is motivated to make it, but it means an abandoned round occupies capacity until
-    /// somebody spends the gas. Recorded rather than designed around.
-    uint256 public activeRoundCount;
+    /// @notice The ids of every non-terminal round, in no particular order.
+    /// @dev An index rather than a counter, because `pendingSettlement` has to LIST these rounds, and
+    /// the only bounded way to list them is to keep them. The cap is `MAX_ACTIVE_ROUNDS`, so every
+    /// loop over this array is bounded by a constant. Added after an adversarial review found
+    /// `pendingSettlement` missing entirely: it was deferred in slice 1 because it needs pools, and
+    /// then not picked up in slices 2 or 3.
+    ///
+    /// A round that passes `submitDeadline` without settling stays in here, holding a slot, until
+    /// someone calls `finalizeRefund`, which anyone may do.
+    uint256[] private _activeIds;
+
+    /// @dev Position in `_activeIds` plus one, so zero means "not active". Used for O(1) removal.
+    mapping(uint256 => uint256) private _activePos;
 
     /// @notice The one non-terminal round each creator may have, or zero.
     mapping(address => uint256) public creatorActiveRound;
@@ -251,6 +257,20 @@ contract MakoRoundsV1 {
     );
 
     event RoundRefunded(uint256 indexed roundId, RefundReason reason);
+
+    /// @notice A tie's settlement evidence. `SPEC.md` §5.3 and N14: both prices, both observation
+    /// seconds and both report hashes are stored AND emitted on every settlement, a tie included.
+    /// @dev A separate event rather than `RoundSettled` with no outcome, so a consumer can never read
+    /// a refunded round as settled. Emitted immediately before `RoundRefunded(roundId, Tie)`.
+    event RoundTied(
+        uint256 indexed roundId,
+        int192 price,
+        uint32 anchorObservedAt,
+        uint32 closeObservedAt,
+        bytes32 anchorReportHash,
+        bytes32 closeReportHash,
+        address settler
+    );
 
     event Entered(uint256 indexed roundId, address indexed entrant, Side side, uint256 amount, uint256 stakeTotal);
 
@@ -344,6 +364,38 @@ contract MakoRoundsV1 {
         return _existing(roundId).startTime + DURATION + SUBMIT_WINDOW;
     }
 
+    /// @notice How many rounds are non-terminal right now.
+    function activeRoundCount() external view returns (uint256) {
+        return _activeIds.length;
+    }
+
+    /// @notice The rounds a courier should settle now. `SPEC.md` §5.1, and §5.5 step 1 makes it the
+    /// keeper's and the CRE workflow's only input.
+    /// @dev Rounds past `closeTime`, before `submitDeadline`, not terminal and two-sided. At most
+    /// `MAX_ACTIVE_ROUNDS` of them by construction, since it filters the active index, so the loop is
+    /// bounded by a constant and the view cannot become too expensive to call.
+    ///
+    /// "Two-sided" matters: a one-sided round can never settle (`SPEC.md:135`), so listing it would
+    /// send a courier to fetch reports for a call that must revert.
+    function pendingSettlement() external view returns (uint256[] memory ids) {
+        uint256 n = _activeIds.length;
+        uint256[] memory buf = new uint256[](n);
+        uint256 k;
+        for (uint256 i = 0; i < n; i++) {
+            uint256 id = _activeIds[i];
+            Round storage r = _rounds[id];
+            uint64 closeTime = r.startTime + DURATION;
+            if (
+                block.timestamp >= closeTime && block.timestamp < closeTime + SUBMIT_WINDOW && r.upPool != 0
+                    && r.downPool != 0
+            ) buf[k++] = id;
+        }
+        ids = new uint256[](k);
+        for (uint256 i = 0; i < k; i++) {
+            ids[i] = buf[i];
+        }
+    }
+
     function roundOf(uint256 roundId) external view returns (Round memory) {
         return _existing(roundId);
     }
@@ -375,7 +427,7 @@ contract MakoRoundsV1 {
         if (startTime > openTime + MAX_LEAD) revert LeadTooLong();
 
         if (creatorActiveRound[msg.sender] != 0) revert CreatorHasActiveRound();
-        if (activeRoundCount >= MAX_ACTIVE_ROUNDS) revert TooManyActiveRounds();
+        if (_activeIds.length >= MAX_ACTIVE_ROUNDS) revert TooManyActiveRounds();
 
         roundId = ++roundCount;
         _rounds[roundId] = Round({
@@ -403,9 +455,8 @@ contract MakoRoundsV1 {
         });
 
         creatorActiveRound[msg.sender] = roundId;
-        unchecked {
-            activeRoundCount++;
-        }
+        _activeIds.push(roundId);
+        _activePos[roundId] = _activeIds.length;
 
         emit RoundScheduled(
             roundId,
@@ -499,7 +550,14 @@ contract MakoRoundsV1 {
     /// @param roundId the round
     /// @param anchorReport the full report observed at exactly `startTime`
     /// @param closeReport the full report observed at exactly `closeTime`
-    function settle(uint256 roundId, bytes calldata anchorReport, bytes calldata closeReport) external {
+    /// @dev `nonReentrant` although it moves no value. `settle` calls the verifier twice BEFORE it
+    /// writes anything, so a verifier that re-entered `settle` would run a complete inner settlement
+    /// under the outer one's already-passed status check: the protocol fee would accrue twice and the
+    /// slot would be released twice. That needs a compromised verifier, which could already lie about
+    /// prices, so it adds nothing to that trust assumption; but it is the kind of double-count a
+    /// cheap guard removes outright rather than leaving to an argument. Raised by the adversarial
+    /// review as an unproven suspicion, and proven by `test_SettleIsNotReentrant`.
+    function settle(uint256 roundId, bytes calldata anchorReport, bytes calldata closeReport) external nonReentrant {
         _settle(roundId, anchorReport, closeReport);
     }
 
@@ -553,7 +611,7 @@ contract MakoRoundsV1 {
         r.anchorReportHash = keccak256(anchorReport);
         r.closeReportHash = keccak256(closeReport);
 
-        _releaseSlot(r);
+        _releaseSlot(roundId, r);
 
         if (close.price == anchor.price) {
             // A tie refunds, and a refund charges NOTHING: every entrant receives exactly their
@@ -561,6 +619,17 @@ contract MakoRoundsV1 {
             // `sum(refunds) == total` by construction. The payout path is slice 3.
             r.status = Status.Refunded;
             r.refundReason = RefundReason.Tie;
+            // The evidence is emitted, not only stored: an adversarial review found the tie branch
+            // emitting nothing but the refund reason. Both prices are equal, so one is enough.
+            emit RoundTied(
+                roundId,
+                anchor.price,
+                anchor.observationsTimestamp,
+                close.observationsTimestamp,
+                r.anchorReportHash,
+                r.closeReportHash,
+                msg.sender
+            );
             emit RoundRefunded(roundId, RefundReason.Tie);
             return;
         }
@@ -633,7 +702,7 @@ contract MakoRoundsV1 {
             revert NotRefundableYet();
         }
 
-        _releaseSlot(r);
+        _releaseSlot(roundId, r);
         r.status = Status.Refunded;
         r.refundReason = reason;
         emit RoundRefunded(roundId, reason);
@@ -749,10 +818,16 @@ contract MakoRoundsV1 {
     }
 
     /// @dev A round leaving the non-terminal set frees both the global slot and its creator's.
-    function _releaseSlot(Round storage r) private {
+    /// Swap-and-pop, so removal is O(1) and the array never has holes. Checked arithmetic on the
+    /// position means releasing a round that is not in the set reverts rather than corrupting the
+    /// index, which is a second line of defence behind the terminal-state guards.
+    function _releaseSlot(uint256 roundId, Round storage r) private {
         creatorActiveRound[r.creator] = 0;
-        unchecked {
-            activeRoundCount--;
-        }
+        uint256 pos = _activePos[roundId] - 1;
+        uint256 last = _activeIds[_activeIds.length - 1];
+        _activeIds[pos] = last;
+        _activePos[last] = pos + 1;
+        _activeIds.pop();
+        delete _activePos[roundId];
     }
 }

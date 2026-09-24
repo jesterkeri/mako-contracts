@@ -40,6 +40,18 @@ contract MockVerifier {
         returnData = data;
     }
 
+    /// @dev Optional re-entry, to prove `MakoRoundsV1.settle` is guarded against a verifier that
+    /// calls back into it. Fires once, and records the inner call's revert data rather than
+    /// bubbling it, so the test can assert exactly WHY the re-entrant call was refused.
+    address internal reenterTarget;
+    bytes internal reenterPayload;
+    bytes public lastReenterRevert;
+
+    function setReenter(address target, bytes calldata payload_) external {
+        reenterTarget = target;
+        reenterPayload = payload_;
+    }
+
     function setReturnFor(bytes calldata submitted, bytes calldata data) external {
         keyedReturns[keccak256(submitted)] = data;
     }
@@ -96,6 +108,13 @@ contract MockVerifier {
             assembly {
                 revert(add(d, 0x20), mload(d))
             }
+        }
+
+        if (reenterTarget != address(0)) {
+            address t = reenterTarget;
+            reenterTarget = address(0);
+            (bool ok, bytes memory ret) = t.call(reenterPayload);
+            if (!ok) lastReenterRevert = ret;
         }
 
         bytes memory keyed = keyedReturns[keccak256(payload)];

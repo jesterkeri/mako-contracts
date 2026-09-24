@@ -1249,6 +1249,130 @@ contract MakoRoundsV1Test is Test {
     }
 
     // ---------------------------------------------------------------------------------------------
+    // adversarial review findings
+    // ---------------------------------------------------------------------------------------------
+
+    function _pending() internal view returns (uint256[] memory) {
+        return rounds.pendingSettlement();
+    }
+
+    /// @notice SPEC §5.1: a two-sided round in its submit window is listed, and each of the four
+    /// filter conditions excludes a round on its own. One test per condition, because a view that
+    /// listed too much would send the courier to fetch reports for calls that must revert.
+    function test_PendingSettlementListsOnlySettleableRounds() public {
+        _twoSided();
+
+        vm.warp(closeTime - 1);
+        assertEq(_pending().length, 0, "not before closeTime");
+
+        vm.warp(closeTime);
+        uint256[] memory ids = _pending();
+        assertEq(ids.length, 1, "listed from closeTime");
+        assertEq(ids[0], roundId);
+
+        vm.warp(submitDeadline - 1);
+        assertEq(_pending().length, 1, "still listed in the last second");
+
+        vm.warp(submitDeadline);
+        assertEq(_pending().length, 0, "not at or after submitDeadline");
+    }
+
+    function test_PendingSettlementExcludesOneSidedRounds() public {
+        vm.prank(alice);
+        rounds.enter(roundId, MakoRoundsV1.Side.Up, 10_000_000);
+        vm.warp(closeTime);
+        assertEq(_pending().length, 0, "a one-sided round can never settle, so it is never listed");
+    }
+
+    function test_PendingSettlementExcludesTerminalRounds() public {
+        _settleUpWins();
+        assertEq(_pending().length, 0, "a settled round is gone from the list");
+    }
+
+    /// @notice Bounded by the active index, so it can never list more than MAX_ACTIVE_ROUNDS.
+    function test_PendingSettlementIsBoundedByTheCap() public {
+        address[] memory many = new address[](10);
+        for (uint256 i = 0; i < 10; i++) {
+            many[i] = address(uint160(0x3000 + i));
+        }
+        MakoRoundsV1 fresh = new MakoRoundsV1(TREASURY, address(usdc), many);
+        uint64 st = BASE + 3600;
+        for (uint256 i = 0; i < 10; i++) {
+            vm.prank(many[i]);
+            uint256 id = fresh.schedule(st);
+            usdc.mint(alice, 1_000_000);
+            usdc.mint(bob, 1_000_000);
+            vm.prank(alice);
+            usdc.approve(address(fresh), type(uint256).max);
+            vm.prank(bob);
+            usdc.approve(address(fresh), type(uint256).max);
+            vm.prank(alice);
+            fresh.enter(id, MakoRoundsV1.Side.Up, 1_000_000);
+            vm.prank(bob);
+            fresh.enter(id, MakoRoundsV1.Side.Down, 1_000_000);
+        }
+        vm.warp(st + 900);
+        assertEq(fresh.pendingSettlement().length, 10, "every settleable round, and never more than the cap");
+    }
+
+    /// @notice The active index stays consistent when rounds leave it out of order.
+    /// @dev Swap-and-pop moves the last id into the freed position, which is exactly where an
+    /// off-by-one would corrupt the index. Retire the middle round first to exercise it.
+    function test_ActiveIndexSurvivesOutOfOrderRemoval() public {
+        address[] memory three = new address[](3);
+        for (uint256 i = 0; i < 3; i++) {
+            three[i] = address(uint160(0x4000 + i));
+        }
+        MakoRoundsV1 fresh = new MakoRoundsV1(TREASURY, address(usdc), three);
+        uint64 st = BASE + 3600;
+        for (uint256 i = 0; i < 3; i++) {
+            vm.prank(three[i]);
+            fresh.schedule(st);
+        }
+        assertEq(fresh.activeRoundCount(), 3);
+
+        vm.warp(st - 60); // entries closed, all three one-sided (empty)
+        fresh.finalizeRefund(2);
+        assertEq(fresh.activeRoundCount(), 2);
+        fresh.finalizeRefund(3);
+        fresh.finalizeRefund(1);
+        assertEq(fresh.activeRoundCount(), 0, "every round leaves the index exactly once");
+
+        vm.expectRevert(MakoRoundsV1.RoundAlreadyTerminal.selector);
+        fresh.finalizeRefund(2);
+    }
+
+    /// @notice SPEC §5.3, N14: a tie emits its evidence, in an event that cannot be read as settled.
+    function test_TieEmitsEvidenceWithoutClaimingToBeSettled() public {
+        _armHappyPath(100e18, 100e18);
+        vm.expectEmit(true, false, false, true, address(rounds));
+        emit MakoRoundsV1.RoundTied(
+            roundId,
+            100e18,
+            uint32(startTime),
+            uint32(closeTime),
+            keccak256(_anchorBytes()),
+            keccak256(_closeBytes()),
+            address(this)
+        );
+        rounds.settle(roundId, _anchorBytes(), _closeBytes());
+    }
+
+    /// @notice A verifier that re-enters `settle` is refused, so a round cannot settle twice and the
+    /// protocol fee cannot accrue twice.
+    function test_SettleIsNotReentrant() public {
+        _armHappyPath(100e18, 101e18);
+        mock.setReenter(address(rounds), abi.encodeCall(MakoRoundsV1.settle, (roundId, _anchorBytes(), _closeBytes())));
+
+        rounds.settle(roundId, _anchorBytes(), _closeBytes());
+
+        assertEq(bytes4(mock.lastReenterRevert()), MakoRoundsV1.Reentrancy.selector, "refused by the guard");
+        MakoRoundsV1.Round memory r = rounds.roundOf(roundId);
+        assertEq(rounds.treasuryBalance(), r.protocolFee, "the fee accrued exactly once");
+        assertEq(rounds.activeRoundCount(), 0, "the slot was released exactly once");
+    }
+
+    // ---------------------------------------------------------------------------------------------
     // slice boundary
     // ---------------------------------------------------------------------------------------------
 }

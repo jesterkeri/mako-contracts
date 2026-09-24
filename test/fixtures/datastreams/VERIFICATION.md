@@ -195,8 +195,8 @@ Every mutation runs on a copy in a temp directory. `git checkout` is never used,
 about undoing uncommitted work, and both runners assert the working-tree file is byte-identical to
 where it started.
 
-**Solidity: 57 mutations, 57 killed.** Every one caught at RUNTIME by a named test.
-Run 2026-09-24 against all three slices of `MakoRoundsV1`.
+**Solidity: 63 mutations, 63 killed, 0 survived.** Every one caught at RUNTIME by a named
+test. Run 2026-09-24 against all three slices plus the adversarial-review fixes.
 
 ### `src/RoundSettlement.sol` (15 mutations)
 
@@ -218,20 +218,20 @@ Run 2026-09-24 against all three slices of `MakoRoundsV1`.
 | step 7 | delete the expiry check | `test_LibraryAgreesWithTheCorpusOnEveryMockRow` |
 | step 3 | decode the SUBMITTED bytes instead of the verified return | `test_LibraryAgreesWithTheCorpusOnEveryMockRow` |
 
-### `src/MakoRoundsV1.sol`, slices 1 to 3 (42 mutations)
+### `src/MakoRoundsV1.sol` (48 mutations)
 
-Round-level guards the library cannot make; entry and exact-token semantics; fee accounting; and every path by
-which money leaves.
+Round-level guards the library cannot make; entry and exact-token semantics; fee accounting; every path by
+which money leaves; and the fixes from the adversarial pass.
 
 | Clause | Mutation | Killed by |
 |---|---|---|
-| SPEC 3 lifecycle | allow settlement before closeTime | `test_SettleRevertsBeforeCloseTime` |
-| N13 | allow settlement at or after submitDeadline | `test_SettleAndRefundWindowsDisjoint`, `test_StuckRoundsHoldCapacityUntilSomeoneRefundsThem` |
-| SPEC 3 terminal states | allow a round to settle twice | `test_ARefundedRoundCannotThenSettle`, `test_RoundSettlesAtMostOnce` |
-| N25 | check the anchor against closeTime instead of startTime | `test_ARefundChargesNoFees`, `test_ARefundedRoundCannotThenSettle`, `test_AnchorSecondIsStartTime`, +23 more |
-| N1 | check the close against startTime instead of closeTime | `test_ARefundChargesNoFees`, `test_ARefundedRoundCannotThenSettle`, `test_ClaimIsNotReentrant`, +22 more |
-| SPEC 5.3 | invert the outcome direction | `test_ClaimIsNotReentrant`, `test_CreatorWhoWonGetsPayoutAndFeeInOneCall`, `test_LoserClaimReverts`, +6 more |
-| SPEC 5.3 | settle a tie as UP instead of refunding | `test_ARefundChargesNoFees`, `test_ARefundedRoundCannotThenSettle`, `test_EqualPricesRefundAsTie`, +2 more |
+| SPEC 3 lifecycle | allow settlement before closeTime | `test_SettleRevertsBeforeCloseTime`, `test_BoundariesHoldAtPlusMinusOne` |
+| N13 | allow settlement at or after submitDeadline | `test_SettleAndRefundWindowsDisjoint`, `test_StuckRoundsHoldCapacityUntilSomeoneRefundsThem`, `test_BoundariesHoldAtPlusMinusOne` |
+| SPEC 3 terminal states | allow a round to settle twice | `test_ARefundedRoundCannotThenSettle`, `test_RoundSettlesAtMostOnce`, `test_LastSecondSettleWinsAndIsFinal` |
+| N25 | check the anchor against closeTime instead of startTime | `test_LastSecondSettleWinsAndIsFinal`, `test_TieEmitsItsSettlementEvidence`, `test_ARefundChargesNoFees`, +29 more |
+| N1 | check the close against startTime instead of closeTime | `test_LastSecondSettleWinsAndIsFinal`, `test_TieEmitsItsSettlementEvidence`, `test_ARefundChargesNoFees`, +28 more |
+| SPEC 5.3 | invert the outcome direction | `test_LastSecondSettleWinsAndIsFinal`, `test_ClaimIsNotReentrant`, `test_CreatorWhoWonGetsPayoutAndFeeInOneCall`, +7 more |
+| SPEC 5.3 | settle a tie as UP instead of refunding | `test_TieEmitsItsSettlementEvidence`, `test_ARefundChargesNoFees`, `test_ARefundedRoundCannotThenSettle`, +5 more |
 | N27 | drop the whole-minute boundary requirement | `test_StartTimeOnMinute` |
 | SPEC 8 | drop the creator allowlist | `test_OnlyCreatorsMaySchedule` |
 | SPEC 4 | drop the per-creator active-round limit | `test_OneNonTerminalRoundPerCreator` |
@@ -242,7 +242,7 @@ which money leaves.
 | SPEC 4, TREASURY | accept a zero treasury | `test_ConstructorRejectsZeroTreasury` |
 | SPEC 8 | accept an empty creator set | `test_ConstructorRejectsAnEmptyCreatorSet` |
 | SPEC 3 terminal states | allow entry into a terminal round | `test_EntryIntoATerminalRoundReverts` |
-| N2, N25 | allow entry at or after entryCloseTime | `test_EntryRevertsAtEntryClose` |
+| N2, N25 | allow entry at or after entryCloseTime | `test_EntryRevertsAtEntryClose`, `test_BoundariesHoldAtPlusMinusOne` |
 | SPEC 4, MIN_ENTRY | drop the minimum entry | `test_EntryBelowTheMinimumReverts` |
 | N12 | let one address take both sides | `test_OneAddressOneSide` |
 | N22 | credit the requested amount rather than what arrived | `test_FeeOnTransferTokenReverts`, `test_OvershootingTokenReverts` |
@@ -252,21 +252,34 @@ which money leaves.
 | SPEC 7 | charge the protocol fee on the smaller side instead of the total | `test_FeesFollowTheSpecFormula` |
 | SPEC 7 | charge the creator fee on the total instead of the smaller side | `test_FeesFollowTheSpecFormula` |
 | SPEC 7 conservation | leave the fees inside distributable | `test_CreatorWhoWonGetsPayoutAndFeeInOneCall`, `test_FeesFollowTheSpecFormula` |
-| N3, settle/refund exclusivity | refund a two-sided round as OneSided | `test_FinalizeRefundAfterDeadline`, `test_TwoSidedRoundCannotRefundAsOneSided` |
-| N5, N13 | allow NoPrice before submitDeadline | `test_FinalizeRefundAfterDeadline`, `test_TwoSidedRoundCannotRefundAsOneSided` |
-| SPEC 3 terminal states | allow finalizeRefund on a terminal round | `test_FinalizeRefundOnATerminalRoundReverts` |
+| N3, settle/refund exclusivity | refund a two-sided round as OneSided | `test_FinalizeRefundAfterDeadline`, `test_TwoSidedRoundCannotRefundAsOneSided`, `test_BoundariesHoldAtPlusMinusOne` |
+| N5, N13 | allow NoPrice before submitDeadline | `test_FinalizeRefundAfterDeadline`, `test_TwoSidedRoundCannotRefundAsOneSided`, `test_BoundariesHoldAtPlusMinusOne` |
+| SPEC 3 terminal states | allow finalizeRefund on a terminal round | `test_ActiveIndexSurvivesOutOfOrderRemoval`, `test_FinalizeRefundOnATerminalRoundReverts`, `test_LastSecondSettleWinsAndIsFinal` |
 | N6 | allow claiming before a terminal state | `test_ClaimBeforeTerminalReverts`, `test_SeedLocked` |
 | SPEC 7, losers receive nothing | pay any entrant as if they won | `test_LoserClaimReverts` |
 | N19 no double claim | never mark a stake claimed | `test_CreatorWhoWonGetsPayoutAndFeeInOneCall`, `test_NoDoubleClaim` |
 | N19 creator fee once | never mark the creator fee claimed | `test_CreatorWhoWonGetsPayoutAndFeeInOneCall`, `test_ZeroStakeCreatorClaimsFee` |
-| N19 fees only on SETTLED | pay the creator fee on a refunded round | `test_RefundRecordsNoCreatorFee`, added after this mutant **survived** the first sweep |
+| N19 fees only on SETTLED | pay the creator fee on a refunded round | `test_RefundRecordsNoCreatorFee` |
 | N17 | sweep the remainder on the first winner, not the last | `test_RemainderWaitsForTheLastWinner` |
 | SPEC 7, N17 | pay winners from the total instead of distributable | `test_ClaimIsNotReentrant`, `test_CreatorWhoWonGetsPayoutAndFeeInOneCall`, `test_NoDoubleClaim`, +2 more |
 | N19 | let anyone withdraw the treasury | `test_TreasuryOnly` |
 | N17, double spend | do not zero the treasury balance on withdrawal | `test_TreasuryOnly` |
 | N8, N17 | ignore an outbound shortfall | `test_ShortOutboundTransferReverts` |
-| N8 | remove the reentrancy guard | `test_ClaimIsNotReentrant`, `test_EnterIsNotReentrant`, `test_WithdrawTreasuryIsNotReentrant` |
-| N17, N19 | do not accrue the protocol fee to the treasury | `test_TreasuryOnly`, `test_WithdrawTreasuryIsNotReentrant` |
+| N8 | remove the reentrancy guard | `test_ClaimIsNotReentrant`, `test_EnterIsNotReentrant`, `test_SettleIsNotReentrant`, +1 more |
+| N17, N19 | do not accrue the protocol fee to the treasury | `test_SettleIsNotReentrant`, `test_TreasuryOnly`, `test_WithdrawTreasuryIsNotReentrant` |
+| SPEC 5.1 | list rounds before closeTime as pending | `test_PendingSettlementListsOnlySettleableRounds` |
+| SPEC 5.1 | list rounds past submitDeadline as pending | `test_PendingSettlementListsOnlySettleableRounds` |
+| SPEC 5.1, SPEC.md:135 | list one-sided rounds as pending | `test_PendingSettlementExcludesOneSidedRounds` |
+| SPEC 5.3, N14 | drop the tie evidence event | `test_TieEmitsEvidenceWithoutClaimingToBeSettled`, `test_TieEmitsItsSettlementEvidence` |
+| N8, double settlement | remove the reentrancy guard from settle | `test_SettleIsNotReentrant` |
+| SPEC 4, MAX_ACTIVE_ROUNDS, SPEC 5.1 | forget to remove a round from the active index | `test_ActiveIndexSurvivesOutOfOrderRemoval`, `test_PendingSettlementExcludesTerminalRounds`, `test_SettleIsNotReentrant`, +2 more |
+
+**The adversarial pass** (an isolated agent given only the spec and the diff) found two defects, both now
+fixed with their tests adopted into `test/Adversary.t.sol`: `pendingSettlement()` was missing although SPEC
+§5.1 requires it, and a Tie stored its evidence without emitting it (SPEC §5.3, N14). It also raised as an
+unproven suspicion that `settle` lacked `nonReentrant`; a re-entering verifier could have settled a round twice
+and accrued the protocol fee twice. `settle` is now guarded and `test_SettleIsNotReentrant` proves it. Its
+money attacks, including a 2,000-run cross-round solvency fuzz, all failed.
 
 **What the runs found beyond the counts.**
 
