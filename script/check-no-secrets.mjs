@@ -21,11 +21,13 @@ const PATTERNS = [
   { name: '32-byte hex private key assignment', re: /(PRIVATE_KEY|private_key|privateKey)\s*[:=]\s*["']?0x[0-9a-fA-F]{64}/ },
 ];
 
-// Files that exist to describe these patterns, not to contain secrets.
-const ALLOW = new Set(['script/check-no-secrets.mjs', 'script/test-probe-redaction.mjs']);
-
-const files = execFileSync('git', ['ls-files'], { encoding: 'utf8' }).split('\n').filter(Boolean)
-  .filter((f) => !f.startsWith('lib/') && !ALLOW.has(f));
+// EVERY tracked file, with no exemption by name. The first version exempted this file and the probe
+// redaction test by filename, which contradicted "any tracked file" and left the test file, which builds
+// endpoint-shaped material on purpose, as the most plausible place for a real copied key to go unscanned.
+// The Codex diff review (round 4) caught it. Neither file needs an exemption: this file's patterns are
+// regex source text, not literal endpoints, and the tests build their fake values at runtime. Entries that
+// are not readable text (the lib/forge-std gitlink, binaries) are skipped by CONTENT below, not by path.
+const files = execFileSync('git', ['ls-files'], { encoding: 'utf8' }).split('\n').filter(Boolean);
 
 const hits = [];
 for (const f of files) {

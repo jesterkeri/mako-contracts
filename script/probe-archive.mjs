@@ -104,7 +104,9 @@ async function rpc(url, method, params) {
   const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
   const text = await res.text();
   let parsed; try { parsed = JSON.parse(text); } catch { parsed = null; }
-  return { httpStatus: res.status, body: parsed, raw: text, requestHash: sha256(body), responseHash: sha256(text) };
+  // The raw response text is NOT returned: it is provider-controlled and may echo the request URL. Only its
+  // hash leaves this function, for correlation.
+  return { httpStatus: res.status, body: parsed, requestHash: sha256(body), responseHash: sha256(text) };
 }
 
 // A not-served answer is retried to a budget. A revert is NOT retried: it is data.
@@ -114,15 +116,32 @@ async function rpcWithRetry(url, method, params) {
   for (let i = 1; i <= RETRY_ATTEMPTS; i++) {
     let r;
     try { r = await rpc(url, method, params); }
-    catch (e) { attempts.push({ attempt: i, transport: String(e.message || e) }); await sleep(delay); delay = Math.min(delay * 2, RETRY_CAP_MS); continue; }
+    // A transport error's message can carry the URL (and its cause can), so only a fixed category is kept.
+    catch { attempts.push({ attempt: i, category: 'transport' }); await sleep(delay); delay = Math.min(delay * 2, RETRY_CAP_MS); continue; }
     const err = r.body?.error;
     const served = r.httpStatus === 200 && (r.body?.result !== undefined || isRevert(err));
-    attempts.push({ attempt: i, httpStatus: r.httpStatus, error: err ? { code: err.code, message: err.message } : null, served });
+    attempts.push({ attempt: i, httpStatus: r.httpStatus, rpcCode: rpcCodeOf(err), category: categorize(err, r.httpStatus), served });
     if (served) return { ...r, attempts, served: true };
     if (i < RETRY_ATTEMPTS) { await sleep(delay); delay = Math.min(delay * 2, RETRY_CAP_MS); }
   }
   return { attempts, served: false };
 }
+
+// PROVIDER ERROR TEXT IS UNTRUSTED AND MAY BE SECRET-BEARING. A provider, gateway or proxy is free to
+// echo the request URL, credential included, in a JSON-RPC error message. The Codex diff review (round 4)
+// showed the previous version printing that message verbatim to stdout, where a CI run publishes it,
+// BEFORE the evidence guard ever ran. So a message is inspected transiently by `isRevert` and `categorize`
+// and NEVER returned, stored or logged: only a locally derived category and the numeric code survive.
+function categorize(err, httpStatus) {
+  if (!err) return httpStatus === 200 ? 'ok' : `http-${Number(httpStatus) || 0}`;
+  const m = String(err.message || '').toLowerCase();
+  if (m.includes('missing trie node') || m.includes('pruned') || m.includes('not found')) return 'not-served';
+  if (m.includes('rate limit') || m.includes('capacity') || httpStatus === 429) return 'rate-limited';
+  if (m.includes('exceeds provider limit')) return 'provider-gas-limit';
+  if (isRevert(err)) return 'revert';
+  return 'rpc-error';
+}
+const rpcCodeOf = (err) => (err && Number.isInteger(err.code) ? err.code : null);
 
 // A revert carries execution data; "missing trie node", a gas-limit refusal or a 429 do not.
 function isRevert(err) {
@@ -195,19 +214,47 @@ function resolveProvider(id) {
 const URLS = new Map();
 const urlOf = (p) => URLS.get(p.id);
 
+/// The secret-bearing fragments of every configured URL: the whole URL, its path, its query, each also
+/// hex-encoded (a provider can return arbitrary bytes that decode to text). Hosts are not secret.
+function secretFragments() {
+  const out = [];
+  for (const url of URLS.values()) {
+    const u = new URL(url);
+    for (const f of [url, u.pathname !== '/' ? u.pathname : null, u.search || null]) {
+      if (f && f.length >= 4) out.push(f, Buffer.from(f).toString('hex'));
+    }
+  }
+  return out;
+}
+
+/// Redacts every configured URL fragment from a string. Used on ALL console output, so a provider string
+/// that slips through some future code path still cannot put a credential in a log. It is the stdout
+/// counterpart of `writeEvidence`'s refusal.
+function scrub(text) {
+  let t = String(text);
+  for (const f of secretFragments()) t = t.split(f).join('[redacted]');
+  return t;
+}
+{
+  const log = console.log.bind(console);
+  const err = console.error.bind(console);
+  console.log = (...a) => log(...a.map(scrub));
+  console.error = (...a) => err(...a.map(scrub));
+  // An uncaught error's message can quote provider data too. Print it scrubbed, then fail.
+  process.on('uncaughtException', (e) => { err(scrub(`uncaught: ${e?.message ?? e}`)); process.exit(1); });
+  process.on('unhandledRejection', (e) => { err(scrub(`unhandled: ${e?.message ?? e}`)); process.exit(1); });
+}
+
 /// The only function that writes evidence. Before writing, it checks the serialized text for every
 /// configured URL, and for each URL's path and query on their own, and refuses to write if any appears.
 /// A key hidden in a path segment or query parameter is caught even if the host was stripped elsewhere.
 function writeEvidence(dir, name, obj) {
   const text = JSON.stringify(obj, null, 2);
-  for (const url of URLS.values()) {
-    const u = new URL(url);
-    const secretish = [url, u.pathname !== '/' ? u.pathname : null, u.search || null].filter(Boolean);
-    for (const frag of secretish) {
-      if (frag.length >= 4 && text.includes(frag)) {
-        console.error(`REFUSING TO WRITE EVIDENCE: it would contain part of a configured RPC URL. Nothing was written.`);
-        process.exit(5);
-      }
+  const lower = text.toLowerCase();
+  for (const frag of secretFragments()) {
+    if (text.includes(frag) || lower.includes(frag.toLowerCase())) {
+      console.error(`REFUSING TO WRITE EVIDENCE: it would contain part of a configured RPC URL. Nothing was written.`);
+      process.exit(5);
     }
   }
   writeFileSync(join(dir, name), text);
@@ -245,7 +292,9 @@ async function identity(p, block) {
     codeSha256: sha256(Buffer.from(codeHex.replace(/^0x/, ''), 'hex')),
     feeManager: addrOf(fm),
     accessController: addrOf(ac),
-    typeAndVersion: tvString,
+    // Provider-controlled text, so it is kept verbatim ONLY when it is exactly the expected value;
+    // otherwise only its hash is kept, since an unexpected string could echo anything.
+    typeAndVersion: tvString === VERIFIER_TYPE_AND_VERSION ? tvString : `MISMATCH sha256:${sha256(tvString)}`,
     block: { number: Number(BigInt(b.number)), hash: b.hash, timestamp: Number(BigInt(b.timestamp)) },
   };
 }
@@ -318,7 +367,12 @@ for (const p of [A, B]) {
 
   const call = await rpcWithRetry(urlOf(p), 'eth_call', [{ to: VERIFIER, data: calldata }, hex(DEFAULT_TARGET.block)]);
   if (!call.served) { console.log(`  verify: NOT SERVED after ${call.attempts.length} attempts`); results[p.id] = { provider: p, identity: ident, identityOk: idOk, status: 'ARCHIVE_UNAVAILABLE', attempts: call.attempts }; continue; }
-  if (call.body?.error) { console.log(`  verify: REVERTED  ${call.body.error.message}`); results[p.id] = { provider: p, identity: ident, identityOk: idOk, status: 'REVERTED', error: call.body.error, attempts: call.attempts, requestHash: call.requestHash, responseHash: call.responseHash }; continue; }
+  if (call.body?.error) {
+    const e = { rpcCode: rpcCodeOf(call.body.error), category: categorize(call.body.error, call.httpStatus) };
+    console.log(`  verify: REVERTED (${e.category}, rpc code ${e.rpcCode})`);
+    results[p.id] = { provider: p, identity: ident, identityOk: idOk, status: 'REVERTED', error: e, attempts: call.attempts, requestHash: call.requestHash, responseHash: call.responseHash };
+    continue;
+  }
 
   const dec = decodeVerifyReturn(call.body.result);
   if (dec.ok) {

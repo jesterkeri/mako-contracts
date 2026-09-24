@@ -45,6 +45,24 @@ Response:
 That test also found an unrelated probe defect: a verifier return shorter than 288 bytes crashed the
 decoder with no evidence written and no classification. It is now recorded as `VERIFICATION_MISMATCH`.
 
+**Round 4 of the Codex diff review found the fix incomplete, one layer out.** The probe no longer WROTE a
+URL, but it still PRINTED provider-controlled JSON-RPC error text verbatim to stdout, where a CI run
+publishes it, before the evidence guard ever ran; a provider or proxy echoing the request URL would have
+put the credential in a public log. And the secret scan exempted two tracked files by name. Now:
+- **All provider text is untrusted and possibly secret-bearing.** Error messages are inspected transiently
+  and reduced to a local category (`revert`, `not-served`, `rate-limited`, `provider-gas-limit`,
+  `rpc-error`, `transport`) plus the numeric code; the text is never logged or stored. The raw response
+  text is no longer returned from the RPC helper at all, only its hash. `typeAndVersion` is stored
+  verbatim only when it equals the expected string, otherwise as a hash.
+- **Every console write is scrubbed** of each configured URL, path and query, plain and hex-encoded, and
+  uncaught errors are printed scrubbed; `writeEvidence` also refuses hex-encoded fragments.
+- `test-probe-redaction.mjs` gains two HOSTILE providers: one echoing the credentialed URL in an HTTP-200,
+  code-3 revert message, one echoing it in `typeAndVersion`. Both pass; **against the round-4 probe both
+  fail with the credential leaked to stdout**, so the test would have caught it.
+- `check-no-secrets.mjs` exempts no file. `test-check-no-secrets.mjs` injects runtime-built key-shaped
+  values into each formerly exempt file and a new file, requires failure without printing the value, and
+  requires a placeholder to pass; against the round-4 scanner the formerly exempt cases fail the test.
+
 ## What this proves
 
 - **Type B2, the library against the real verifier.** `test/RoundSettlementFork.t.sol` forks Monad

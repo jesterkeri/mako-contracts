@@ -41,7 +41,10 @@ jobs:
       - name: No secrets in tracked files
         run: node script/check-no-secrets.mjs
 
-      - name: Archive probe never writes an RPC URL into evidence
+      - name: The secret scan exempts no file and never prints a hit
+        run: node script/test-check-no-secrets.mjs
+
+      - name: Archive probe never writes or prints an RPC URL, even when a provider echoes it
         run: node script/test-probe-redaction.mjs
 
       - name: Run Forge fmt

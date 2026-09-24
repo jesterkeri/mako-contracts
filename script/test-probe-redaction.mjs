@@ -25,19 +25,37 @@ const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SENTINELS = ['SENTINELPATHKEYaaaa1111', 'SENTINELQUERYbbbb2222', 'SENTINELPATHKEYcccc3333', 'SENTINELQUERYdddd4444'];
 
 // ---- a minimal JSON-RPC server answering the calls the probe makes ----
+// MODE makes the mock HOSTILE in the way the Codex diff review (round 4) described: a provider, gateway or
+// proxy is free to echo the request URL, credential included, back in text it controls.
+let MODE = 'normal';
 const WORD0 = '0x' + '00'.repeat(32);
+const abiString = (str) => {
+  const hex = Buffer.from(str).toString('hex');
+  return '0x' + (32).toString(16).padStart(64, '0') + (hex.length / 2).toString(16).padStart(64, '0')
+    + hex.padEnd(Math.ceil(hex.length / 64) * 64, '0');
+};
 const server = createServer((req, res) => {
   let body = '';
   req.on('data', (c) => (body += c));
   req.on('end', () => {
-    const { id, method } = JSON.parse(body);
+    const { id, method, params } = JSON.parse(body);
+    const data = String(params?.[0]?.data || '');
+    res.setHeader('content-type', 'application/json');
+    if (MODE === 'echo-revert' && method === 'eth_call' && data.startsWith('0xf7e83aee')) {
+      // HTTP 200, JSON-RPC code 3, and the full request path and query in the message.
+      res.end(JSON.stringify({ jsonrpc: '2.0', id, error: { code: 3, message: `execution reverted; upstream ${req.url}` } }));
+      return;
+    }
+    if (MODE === 'echo-tv' && method === 'eth_call' && data.startsWith('0x181f5a77')) {
+      res.end(JSON.stringify({ jsonrpc: '2.0', id, result: abiString(`VerifierProxy 2.0.0 via ${req.url}`) }));
+      return;
+    }
     const result = {
       eth_chainId: '0x279f',
       eth_getCode: '0x00',
       eth_call: WORD0 + '00'.repeat(32), // 64 zero bytes: identity will mismatch, which is fine here
       eth_getBlockByNumber: { number: '0x3c01d5b', hash: '0x' + '11'.repeat(32), timestamp: '0x6aaa0c48' },
     }[method];
-    res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({ jsonrpc: '2.0', id, result }));
   });
 });
@@ -86,7 +104,8 @@ async function runProbe(dir, env) {
   return { code: r.status, out: (r.stdout || '') + (r.stderr || ''), resultText };
 }
 
-const leaks = (text) => (text ? SENTINELS.filter((s) => text.includes(s)) : []);
+// Plain AND hex-encoded, since a provider can return bytes that decode to the credential.
+const leaks = (text) => (text ? SENTINELS.filter((s) => text.includes(s) || text.toLowerCase().includes(Buffer.from(s).toString('hex'))) : []);
 const urlA = `http://${HOST}/v2/${SENTINELS[0]}?apikey=${SENTINELS[1]}`;
 const urlB = `http://${HOST}/v2/${SENTINELS[2]}?apikey=${SENTINELS[3]}`;
 
@@ -104,6 +123,20 @@ const scenarios = [
     check: (r) => r.code === 2 && r.resultText !== null && leaks(r.resultText).length === 0 && leaks(r.out).length === 0,
   },
   {
+    name: 'HOSTILE provider echoes the credentialed URL in a JSON-RPC revert message (round 4 finding)',
+    mode: 'echo-revert',
+    opts: {},
+    env: { MAKO_RPC_MOCK_A: urlA, MAKO_RPC_MOCK_B: urlB },
+    check: (r) => r.resultText !== null && leaks(r.resultText).length === 0 && leaks(r.out).length === 0,
+  },
+  {
+    name: 'HOSTILE provider echoes the credentialed URL in its typeAndVersion string',
+    mode: 'echo-tv',
+    opts: {},
+    env: { MAKO_RPC_MOCK_A: urlA, MAKO_RPC_MOCK_B: urlB },
+    check: (r) => r.resultText !== null && leaks(r.resultText).length === 0 && leaks(r.out).length === 0,
+  },
+  {
     name: 'LAST-LINE GUARD: with the original bug put back, the probe refuses to write (exit 5)',
     opts: { reintroduceBug: true },
     env: { MAKO_RPC_MOCK_A: urlA, MAKO_RPC_MOCK_B: urlB },
@@ -114,6 +147,7 @@ const scenarios = [
 let bad = 0;
 for (const sc of scenarios) {
   const dir = tree(sc.opts);
+  MODE = sc.mode || 'normal';
   try {
     const r = await runProbe(dir, sc.env);
     const ok = sc.check(r);
