@@ -32,3 +32,6 @@ wallet.json
 
 # Logs
 *.log
+
+# Claude Code agent worktrees: local scratch copies of this repo, never source
+.claude/worktrees/
