@@ -355,7 +355,9 @@ const index = {
 // that a later FAILED probe run, or a missing evidence directory, then turned the mandatory real row into
 // a skip while the gate still exited 0. So the record is named here, by path and checksum, and the
 // reference refuses anything else.
-const PINNED_B1 = 'test/fixtures/datastreams/evidence/archive-probe-2026-09-24T19-10-24-255Z/RESULT.json';
+// Re-pinned 2026-09-24 to the first record written by the probe after its URL-redaction fix: it holds
+// no endpoint URL at all, public or credentialed. The earlier pinned record held public URLs only.
+const PINNED_B1 = 'test/fixtures/datastreams/evidence/archive-probe-2026-09-24T21-28-43-466Z/RESULT.json';
 const PINNED_FIXTURE = 'test/fixtures/datastreams/pending/btcusd-1789529160.json';
 function pinFile(rel) {
   const abs = join(REPO, rel);

@@ -100,6 +100,22 @@ const scenarios = [
     expect: 'fail',
   },
   {
+    name: 'the fixture is REPLACED and its checksum re-pinned, but the old B1 record is left (round 3 finding)',
+    arrange: (d) => {
+      const f = join(d, 'test/fixtures/datastreams/pending/btcusd-1789529160.json');
+      const j = JSON.parse(readFileSync(f, 'utf8'));
+      // A different report body: flip one hex digit well inside the signed blob.
+      const i = 2 + 2 * 300;
+      j.fullReport = j.fullReport.slice(0, i) + (j.fullReport[i] === '0' ? '1' : '0') + j.fullReport.slice(i + 1);
+      const text = JSON.stringify(j, null, 2);
+      writeFileSync(f, text);
+      const c = JSON.parse(readFileSync(corpusPath(d), 'utf8'));
+      c._realEvidence.fixture.sha256 = sha(Buffer.from(text));
+      writeFileSync(corpusPath(d), JSON.stringify(c, null, 2) + '\n');
+    },
+    expect: 'fail',
+  },
+  {
     name: 'the vendored fixture changed',
     arrange: (d) => {
       const f = join(d, 'test/fixtures/datastreams/pending/btcusd-1789529160.json');

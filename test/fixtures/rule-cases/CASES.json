@@ -16,8 +16,8 @@
   },
   "_realEvidence": {
     "record": {
-      "path": "test/fixtures/datastreams/evidence/archive-probe-2026-09-24T19-10-24-255Z/RESULT.json",
-      "sha256": "6102260ca4b81436c7348463f2f8cf564bd4e7fab75782c3d6e85f0f83d7184d"
+      "path": "test/fixtures/datastreams/evidence/archive-probe-2026-09-24T21-28-43-466Z/RESULT.json",
+      "sha256": "969451ca412a40f38a48fef023582c572d8b23b635af11a46178d418083fb4cf"
     },
     "fixture": {
       "path": "test/fixtures/datastreams/pending/btcusd-1789529160.json",

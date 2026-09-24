@@ -1,13 +1,14 @@
 {
-  "checkedAt": "2026-09-23T15:41:02.547Z",
+  "checkedAt": "2026-09-24T21:28:45.733Z",
   "proofType": "B1",
   "mode": "proof",
   "status": "VERIFIED_MATCH",
-  "proofLevel": "one-domain",
+  "proofLevel": "two-distinct-operators",
   "chainId": 10143,
   "verifier": "0x72790f9eb82db492a7ddb6d2af22a270dcc3db64",
   "pinned": {
     "codeHashKeccak256": "0x4bd86e898b2952f6f0d20fee037accf52490dbdd9279345cd4b0a7161b5c022b",
+    "codeSha256": "246be742ffcc522f72309f1f42c77817af4d6f823969ce9e5763f2a9327ca231",
     "typeAndVersion": "VerifierProxy 2.0.0",
     "feedId": "0x00037da06d56d083fe599397a4769a042d63aa73dc4ef57709d31e9971a5b439",
     "configDigest": "0x00090d9e8d96765a0c49e03a6ae05c82e8f8de70cf179baa632f18313e54bd69"
@@ -26,9 +27,8 @@
     "monad-public": {
       "provider": {
         "id": "monad-public",
-        "url": "https://testnet-rpc.monad.xyz/[REDACTED 2026-09-24: credential removed; rotation required]",
         "host": "testnet-rpc.monad.xyz",
-        "operator": "unknown",
+        "operator": "QuickNode",
         "credentialed": false,
         "endpointConfigSha256": "c39821a2ba4d180a7a5400b594bb138c99e0ee5a3281498235aa1bc7ac837ca6"
       },
@@ -78,14 +78,13 @@
         "ask": "75944083700820000000000"
       }
     },
-    "alchemy": {
+    "monadinfra": {
       "provider": {
-        "id": "alchemy",
-        "url": "https://monad-testnet.g.alchemy.com/[REDACTED 2026-09-24: credential removed; rotation required]",
-        "host": "monad-testnet.g.alchemy.com",
-        "operator": "Alchemy Insights, Inc.",
-        "credentialed": true,
-        "endpointConfigSha256": "bf2c12bd162b7869fef1a8d811dccae1fcae939d43e2f351be6b43c0daea5b1e"
+        "id": "monadinfra",
+        "host": "rpc-testnet.monadinfra.com",
+        "operator": "Monad Foundation",
+        "credentialed": false,
+        "endpointConfigSha256": "2b2c3eed9c839f47feaccb80e2e9ee765a1f0cc4fcf115fadeea0de15ebf9f4b"
       },
       "identity": {
         "served": true,

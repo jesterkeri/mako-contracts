@@ -19,6 +19,32 @@ block deployment.
 
 ---
 
+## Credential incident, 2026-09-23 to 2026-09-24
+
+**An Alchemy API key was committed to this public repository.** On 2026-09-23 the archive probe was run
+with a credentialed Alchemy endpoint. The probe stored its whole provider object, including the full
+URL, in `evidence/archive-probe-2026-09-23T15-40-59-836Z/RESULT.json`, and that file was committed in
+`ca7066c` and pushed. The Codex diff review (round 3) found the code path on 2026-09-24; by then the key
+had been public for about a day.
+
+Response:
+- **Rotation of the key in the Alchemy dashboard (the "mako markets" app) is REQUIRED and, as of this
+  commit, NOT YET CONFIRMED.** Until it is, the copy that remains in git history must be treated as live.
+  History was not rewritten; rotation, not a rewrite, is what makes the leaked copy worthless.
+- The committed file is redacted in place; every other copy was located by path and removed.
+- **The probe can no longer write a URL.** URLs live in a module-private map that nothing serializes;
+  the provider object written into evidence holds only id, host, operator and a non-secret config hash.
+  `writeEvidence` refuses to write anything containing a configured URL's path or query (exit 5).
+  `script/test-probe-redaction.mjs` runs the real probe against a local mock with sentinel tokens in
+  the URL path and query, and proves they reach neither evidence nor console output, on the full run
+  and the early-failure path, and that re-introducing the original bug is refused.
+- **CI now fails on any credentialed endpoint or key-shaped value in a tracked file**
+  (`script/check-no-secrets.mjs`, first step of the workflow), printing file and line, never the value.
+  Shown to catch the leaked file itself in a clone of the commit that carried it.
+
+That test also found an unrelated probe defect: a verifier return shorter than 288 bytes crashed the
+decoder with no evidence written and no classification. It is now recorded as `VERIFICATION_MISMATCH`.
+
 ## What this proves
 
 - **Type B2, the library against the real verifier.** `test/RoundSettlementFork.t.sol` forks Monad
@@ -194,10 +220,16 @@ computation and the oracle cross-check are T1.1's, per the `TASKS.md` exception.
 **The real row is evaluated against ONE pinned B1 record.** `CASES.json` pins the record and the vendored
 fixture by path and SHA-256; the reference itself requires the record to be `VERIFIED_MATCH`,
 `two-distinct-operators`, for block 62922075 with its hash and timestamp, with two byte-identical
-returns. Anything else is a FAILURE of the real row and a non-zero exit, never a skip. The first version
+returns. **And the record must be ABOUT that fixture:** the reference re-encodes
+`verify(fullReport, "")` from the pinned fixture with its own encoder and requires the hash to equal the
+record's `calldataSha256`, and requires the record to name the pinned fixture's path. Without that, a
+renewal that replaced the fixture and re-pinned its checksum would still pass against an OLD B1 record,
+and the new fixture would never have been verified; the Codex diff review (round 3) caught it. The pinned
+record is `archive-probe-2026-09-24T21-28-43-466Z`, the first written after the probe stopped serializing
+URLs, so it holds no endpoint URL at all. Anything else is a FAILURE of the real row and a non-zero exit, never a skip. The first version
 took whichever archive-probe directory sorted last, so a later failed run silently dropped the mandatory
 row while the gate still exited 0; the Codex diff review caught it. `script/test-rule-reference.mjs`
-proves the new behaviour across nine scenarios, including exactly that one, and runs in CI.
+proves the new behaviour across ten scenarios, including both review sequences, and runs in CI.
 
 Two implementations, sharing no code, both driven from `test/fixtures/rule-cases/CASES.json` as
 **data**:

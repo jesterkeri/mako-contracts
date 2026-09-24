@@ -140,6 +140,12 @@ function decodeVerifyReturn(resultHex) {
   const offset = Number(BigInt('0x' + b.subarray(0, 32).toString('hex')));
   const length = Number(BigInt('0x' + b.subarray(32, 64).toString('hex')));
   const payload = b.subarray(64, 64 + length);
+  // A payload that is not a full v3 report is RECORDED as malformed, not decoded. Decoding a short
+  // payload used to throw on `BigInt('0x')`, crashing the probe with no evidence written and no
+  // classification. Found by script/test-probe-redaction.mjs, whose mock returns an empty payload.
+  if (payload.length !== 288) {
+    return { ok: false, reason: `verified payload is ${payload.length} bytes, not 288`, rawBytes: b.length, envelopeLength: length, payloadBytes: payload.length };
+  }
   const w = (i) => payload.subarray(i * 32, (i + 1) * 32);
   const u = (i) => BigInt('0x' + w(i).toString('hex'));
   const s = (i) => { const v = u(i); return v >> 255n ? v - (1n << 256n) : v; };
@@ -172,8 +178,39 @@ function resolveProvider(id) {
   if (!url) return { id, error: `environment variable ${p.urlEnv} is not set` };
   let host; try { host = new URL(url).host; } catch { return { id, error: `${p.urlEnv} is not a URL` }; }
   if (host !== p.host) return { id, error: `resolved host "${host}" is not the approved host "${p.host}" for provider "${id}"` };
-  // the endpoint config hash covers the non-secret shape only: never the path or query, which may carry a key
-  return { id, url, host, operator: p.operator, credentialed: p.credentialed, endpointConfigSha256: sha256(`${id}|${host}`) };
+  // THE URL NEVER ENTERS THE PROVIDER OBJECT. It goes into a private map that nothing serializes, and
+  // the object returned here, which IS written into evidence, carries only non-secret fields.
+  //
+  // 2026-09-24: the first version returned `{ id, url, ... }` and stored that object in the results as
+  // `provider: p`, so RESULT.json contained the full URL. A run with a credentialed Alchemy endpoint wrote
+  // Joshua's key into a tracked evidence file, which was committed to a PUBLIC repository. The key must
+  // be rotated. Redacting at each write site would leave the next new write site to leak it again, so the
+  // secret is kept out of the object entirely, and `writeEvidence` refuses to write anything containing
+  // a configured URL's path or query as a last line of defence.
+  URLS.set(id, url);
+  return { id, host, operator: p.operator, credentialed: p.credentialed, endpointConfigSha256: sha256(`${id}|${host}`) };
+}
+
+/// id -> full URL, possibly key-bearing. Module-private and NEVER serialized.
+const URLS = new Map();
+const urlOf = (p) => URLS.get(p.id);
+
+/// The only function that writes evidence. Before writing, it checks the serialized text for every
+/// configured URL, and for each URL's path and query on their own, and refuses to write if any appears.
+/// A key hidden in a path segment or query parameter is caught even if the host was stripped elsewhere.
+function writeEvidence(dir, name, obj) {
+  const text = JSON.stringify(obj, null, 2);
+  for (const url of URLS.values()) {
+    const u = new URL(url);
+    const secretish = [url, u.pathname !== '/' ? u.pathname : null, u.search || null].filter(Boolean);
+    for (const frag of secretish) {
+      if (frag.length >= 4 && text.includes(frag)) {
+        console.error(`REFUSING TO WRITE EVIDENCE: it would contain part of a configured RPC URL. Nothing was written.`);
+        process.exit(5);
+      }
+    }
+  }
+  writeFileSync(join(dir, name), text);
 }
 
 function proofLevel(a, b) {
@@ -185,14 +222,14 @@ function proofLevel(a, b) {
 // ---- identity, asserted before any answer is trusted ----
 async function identity(p, block) {
   const at = hex(block);
-  const call = async (data) => rpcWithRetry(p.url, 'eth_call', [{ to: VERIFIER, data }, at]);
+  const call = async (data) => rpcWithRetry(urlOf(p), 'eth_call', [{ to: VERIFIER, data }, at]);
   const [cid, code, fm, ac, tv, blk] = await Promise.all([
-    rpcWithRetry(p.url, 'eth_chainId', []),
-    rpcWithRetry(p.url, 'eth_getCode', [VERIFIER, at]),
+    rpcWithRetry(urlOf(p), 'eth_chainId', []),
+    rpcWithRetry(urlOf(p), 'eth_getCode', [VERIFIER, at]),
     call(SEL_FEE_MANAGER),
     call(SEL_ACCESS_CONTROLLER),
     call(SEL_TYPE_AND_VERSION),
-    rpcWithRetry(p.url, 'eth_getBlockByNumber', [at, false]),
+    rpcWithRetry(urlOf(p), 'eth_getBlockByNumber', [at, false]),
   ]);
   const notServed = [cid, code, fm, ac, tv, blk].some((r) => !r.served);
   if (notServed) return { served: false, reason: 'one or more identity reads were not served within the retry budget' };
@@ -230,7 +267,7 @@ console.log(`provider B: ${B.error ? `UNAVAILABLE (${B.error})` : `${B.host}  op
 
 if (A.error || B.error) {
   const out = { checkedAt: new Date().toISOString(), status: 'ARCHIVE_UNAVAILABLE', reason: 'a provider could not be resolved', providerA: A, providerB: B };
-  writeFileSync(join(OUT, 'RESULT.json'), JSON.stringify(out, null, 2));
+  writeEvidence(OUT, 'RESULT.json', out);
   console.error(`\nARCHIVE_UNAVAILABLE: a provider could not be resolved. Set the URL env vars named in script/providers.json.`);
   console.error(`evidence: ${OUT}`);
   process.exit(2);
@@ -279,13 +316,17 @@ for (const p of [A, B]) {
   console.log(`  code sha256 ${ident.codeSha256.slice(0, 16)}... ${ident.codeSha256 === VERIFIER_CODE_SHA256 ? 'matches the pin' : 'DOES NOT MATCH THE PIN'}`);
   console.log(`  identity: ${idOk ? 'MATCHES the pinned record' : 'MISMATCH'}`);
 
-  const call = await rpcWithRetry(p.url, 'eth_call', [{ to: VERIFIER, data: calldata }, hex(DEFAULT_TARGET.block)]);
+  const call = await rpcWithRetry(urlOf(p), 'eth_call', [{ to: VERIFIER, data: calldata }, hex(DEFAULT_TARGET.block)]);
   if (!call.served) { console.log(`  verify: NOT SERVED after ${call.attempts.length} attempts`); results[p.id] = { provider: p, identity: ident, identityOk: idOk, status: 'ARCHIVE_UNAVAILABLE', attempts: call.attempts }; continue; }
   if (call.body?.error) { console.log(`  verify: REVERTED  ${call.body.error.message}`); results[p.id] = { provider: p, identity: ident, identityOk: idOk, status: 'REVERTED', error: call.body.error, attempts: call.attempts, requestHash: call.requestHash, responseHash: call.responseHash }; continue; }
 
   const dec = decodeVerifyReturn(call.body.result);
-  console.log(`  verify: ${dec.rawBytes} raw / ${dec.payloadBytes} decoded, prefix ${dec.schemaPrefix}`);
-  console.log(`  payload sha256 ${dec.payloadSha256.slice(0, 32)}...`);
+  if (dec.ok) {
+    console.log(`  verify: ${dec.rawBytes} raw / ${dec.payloadBytes} decoded, prefix ${dec.schemaPrefix}`);
+    console.log(`  payload sha256 ${dec.payloadSha256.slice(0, 32)}...`);
+  } else {
+    console.log(`  verify: MALFORMED RETURN, ${dec.reason}`);
+  }
   results[p.id] = {
     provider: p, identity: ident, identityOk: idOk, status: 'SERVED',
     attempts: call.attempts, requestHash: call.requestHash, responseHash: call.responseHash,
@@ -300,6 +341,7 @@ let status;
 if (rA.status === 'ARCHIVE_UNAVAILABLE' || rB.status === 'ARCHIVE_UNAVAILABLE') status = 'ARCHIVE_UNAVAILABLE';
 else if (rA.status === 'REVERTED' || rB.status === 'REVERTED') status = 'VERIFICATION_MISMATCH';
 else if (rA.rawResult !== rB.rawResult) status = 'VERIFICATION_MISMATCH';
+else if (!rA.decoded?.ok || !rB.decoded?.ok) status = 'VERIFICATION_MISMATCH'; // a served but malformed return
 else if (!rA.identityOk || !rB.identityOk) status = 'VERIFICATION_MISMATCH';
 else status = 'VERIFIED_MATCH';
 
@@ -317,7 +359,7 @@ const out = {
   providers: { [A.id]: rA, [B.id]: rB },
   bytesIdentical: rA.rawResult !== undefined && rA.rawResult === rB.rawResult,
 };
-writeFileSync(join(OUT, 'RESULT.json'), JSON.stringify(out, null, 2));
+writeEvidence(OUT, 'RESULT.json', out);
 
 console.log(`STATUS: ${status}`);
 console.log(`proofLevel: ${level}`);

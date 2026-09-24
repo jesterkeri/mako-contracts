@@ -6,8 +6,8 @@
 // §2 requires the rule to be computed twice by independent code, both driven from the same corpus
 // as DATA, each asserting its own result against the corpus's expected value FIRST, and only then
 // compared with each other. This is the second implementation. The first is
-// src/RoundSettlement.sol, which does not exist yet: §3 and INVARIANTS.md:45 both require the case
-// table and the rule test to come before it.
+// src/RoundSettlement.sol. The case table and this reference were written BEFORE the library, as §3 and
+// INVARIANTS.md:45 require; the library came after and is evaluated on the same rows.
 //
 // INDEPENDENCE, stated so a reviewer can check it rather than take it on trust:
 //   - This file shares no code with script/build-cases.mjs. It has its own decoder and does not
@@ -147,6 +147,21 @@ function sha256File(abs) {
   return createHash('sha256').update(readFileSync(abs)).digest('hex');
 }
 
+// ---- its own encoder for verify(fullReport, "") ----
+// Written here, not imported from the probe, so the binding below is checked by independent code.
+// Layout: selector, two head offsets, then each `bytes` argument as length + right-padded data. The second
+// argument is empty. The result is a lowercase 0x-hex string, the exact form the probe hashes.
+const VERIFY_SELECTOR = 'f7e83aee'; // keccak256("verify(bytes,bytes)")[0:4], via `cast sig`
+const word = (n) => n.toString(16).padStart(64, '0');
+function encodeVerifyCalldata(fullReportHex) {
+  const body = fullReportHex.replace(/^0x/, '').toLowerCase();
+  const len = body.length / 2;
+  const padded = body.padEnd(Math.ceil(len / 32) * 64, '0');
+  const offsetA = 64;
+  const offsetB = offsetA + 32 + padded.length / 2;
+  return '0x' + VERIFY_SELECTOR + word(offsetA) + word(offsetB) + word(len) + padded + word(0);
+}
+
 function realVerifiedReturn(corpus) {
   const pin = corpus._realEvidence;
   if (!pin || !pin.record || !pin.fixture) return { failed: 'the corpus pins no B1 record' };
@@ -162,6 +177,20 @@ function realVerifiedReturn(corpus) {
   if (res.target?.block !== REQUIRED.block || res.target?.blockHash !== REQUIRED.blockHash || res.target?.blockTimestamp !== REQUIRED.blockTimestamp) {
     return { failed: 'pinned record is not for the pinned block, hash and timestamp' };
   }
+  // THE RECORD MUST BE ABOUT THIS FIXTURE. Pinning the record and the fixture as two independent files
+  // is not enough: a renewal could replace the fixture, re-pin its checksum, and leave an old B1 record in
+  // place, and every check above would still pass while the new fixture was never verified at all. The
+  // Codex diff review (round 3) caught it. So the verify calldata is re-encoded from the pinned fixture and
+  // its hash must equal the one the probe recorded, and the record must name the pinned fixture's path.
+  if (res.target?.reportPath !== pin.fixture.path) {
+    return { failed: `pinned record verified ${res.target?.reportPath}, not the pinned fixture ${pin.fixture.path}` };
+  }
+  const fixture = JSON.parse(readFileSync(join(REPO, pin.fixture.path), 'utf8'));
+  const expectedCalldata = createHash('sha256').update(encodeVerifyCalldata(fixture.fullReport)).digest('hex');
+  if (res.calldataSha256 !== expectedCalldata) {
+    return { failed: `pinned record's verify calldata ${String(res.calldataSha256).slice(0, 12)}... was not built from the pinned fixture (${expectedCalldata.slice(0, 12)}...)` };
+  }
+
   const returns = Object.values(res.providers || {}).map((p) => p.rawResult);
   if (returns.length !== 2 || !returns[0] || returns[0] !== returns[1]) return { failed: 'pinned record lacks two byte-identical verified returns' };
   return { returnData: returns[0], run: pin.record.path, proofLevel: res.proofLevel };
