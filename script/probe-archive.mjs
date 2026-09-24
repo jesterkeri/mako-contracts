@@ -40,8 +40,18 @@ const AS_PROOF = process.argv.includes('--as-proof');
 // ---- pinned constants, from blueprint/SPEC.md ----
 const CHAIN_ID = 10143;
 const VERIFIER = '0x72790f9eb82db492a7ddb6d2af22a270dcc3db64';
-const VERIFIER_CODE_HASH = '0x4bd86e898b2952f6f0d20fee037accf52490dbdd9279345cd4b0a7161b5c022b'; // keccak256, asserted by the fork test
+const VERIFIER_CODE_HASH = '0x4bd86e898b2952f6f0d20fee037accf52490dbdd9279345cd4b0a7161b5c022b'; // keccak256, SPEC.md:78
 const VERIFIER_CODE_BYTES = 7009;
+
+// SHA-256 of the SAME runtime bytes whose keccak256 is `VERIFIER_CODE_HASH`. This script carries no
+// keccak implementation, so it gates on SHA-256 instead; the two are tied together by computing both
+// from identical bytes, served by both QuickNode and Monad Foundation at block 62922075 on 2026-09-24
+// (keccak256 matched SPEC.md:78 on both). The keccak equality itself is asserted in Solidity by
+// test/RoundSettlementFork.t.sol, where keccak256 is a builtin.
+//
+// The first version checked only the code LENGTH and recorded a hash it never compared, so any other
+// 7,009-byte contract returning the right strings would have passed. The Codex diff review caught it.
+const VERIFIER_CODE_SHA256 = '246be742ffcc522f72309f1f42c77817af4d6f823969ce9e5763f2a9327ca231';
 const VERIFIER_TYPE_AND_VERSION = 'VerifierProxy 2.0.0';
 const FEED_ID = '0x00037da06d56d083fe599397a4769a042d63aa73dc4ef57709d31e9971a5b439';
 const CONFIG_DIGEST = '0x00090d9e8d96765a0c49e03a6ae05c82e8f8de70cf179baa632f18313e54bd69';
@@ -250,14 +260,13 @@ for (const p of [A, B]) {
   const ident = await identity(p, DEFAULT_TARGET.block);
   if (!ident.served) { console.log(`  identity: NOT SERVED`); results[p.id] = { provider: p, identity: ident, status: 'ARCHIVE_UNAVAILABLE' }; continue; }
 
-  // The pinned identity value in SPEC.md:78 is a keccak256, which needs a hashing library this
-  // script deliberately does not carry. So the probe asserts everything it can compute natively,
-  // including the exact code SIZE, and records the code's sha256 so a reviewer can bind this run's
-  // bytes to any other. The keccak256 equality is asserted in Solidity by the fork test, where
-  // keccak256 is a builtin and the comparison costs nothing.
+  // The runtime code is identified by its HASH, not merely its length: PROOF_STANDARD §9 requires
+  // the contract whose answers are trusted to be identified by its code, and a length check alone
+  // accepts any other contract of the same size.
   const idOk =
     ident.chainId === CHAIN_ID &&
     ident.codeBytes === VERIFIER_CODE_BYTES &&
+    ident.codeSha256 === VERIFIER_CODE_SHA256 &&
     ident.feeManager === '0x0000000000000000000000000000000000000000' &&
     ident.accessController === '0x0000000000000000000000000000000000000000' &&
     ident.typeAndVersion === VERIFIER_TYPE_AND_VERSION &&
@@ -267,6 +276,7 @@ for (const p of [A, B]) {
   console.log(`  chainId ${ident.chainId}   typeAndVersion "${ident.typeAndVersion}"   code ${ident.codeBytes} bytes`);
   console.log(`  s_feeManager ${ident.feeManager}   s_accessController ${ident.accessController}`);
   console.log(`  block ${ident.block.number} ${ident.block.hash} ts ${ident.block.timestamp}`);
+  console.log(`  code sha256 ${ident.codeSha256.slice(0, 16)}... ${ident.codeSha256 === VERIFIER_CODE_SHA256 ? 'matches the pin' : 'DOES NOT MATCH THE PIN'}`);
   console.log(`  identity: ${idOk ? 'MATCHES the pinned record' : 'MISMATCH'}`);
 
   const call = await rpcWithRetry(p.url, 'eth_call', [{ to: VERIFIER, data: calldata }, hex(DEFAULT_TARGET.block)]);
@@ -301,7 +311,7 @@ const out = {
   proofLevel: level,
   chainId: CHAIN_ID,
   verifier: VERIFIER,
-  pinned: { codeHashKeccak256: VERIFIER_CODE_HASH, typeAndVersion: VERIFIER_TYPE_AND_VERSION, feedId: FEED_ID, configDigest: CONFIG_DIGEST },
+  pinned: { codeHashKeccak256: VERIFIER_CODE_HASH, codeSha256: VERIFIER_CODE_SHA256, typeAndVersion: VERIFIER_TYPE_AND_VERSION, feedId: FEED_ID, configDigest: CONFIG_DIGEST },
   target: DEFAULT_TARGET,
   calldataSha256: sha256(calldata),
   providers: { [A.id]: rA, [B.id]: rB },

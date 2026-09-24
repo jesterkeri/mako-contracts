@@ -1,4 +1,12 @@
-# VERIFICATION: T0.1, the rounds settlement rule
+# VERIFICATION: T0.1 and T1.1, the rounds settlement rule and MakoRoundsV1
+
+**Corrected 2026-09-24 after the Codex diff review.** An earlier version of this record said the
+shipping library was tested "against the real `VerifierProxy`" and that the verifier's identity was
+asserted "in the fork test". **No fork test existed.** The only real-report row was skipped in Solidity
+with a comment deferring it to that nonexistent test, and the B1 probe checked the verifier's code
+LENGTH while recording, but never comparing, its hash. Both are now true: the fork test exists and
+passes on two operators, and the probe gates on the code hash. This paragraph stays so the record does
+not quietly rewrite what it previously claimed.
 
 The record `PROOF_STANDARD.md` Version 3 §13 requires. Every claim below declares its **proof type**
 per §0: **A** offline, **B1** direct `eth_call`, **B2** Foundry fork, **C** transaction.
@@ -13,22 +21,33 @@ block deployment.
 
 ## What this proves
 
-The shipping rule library accepts and rejects exactly what `SPEC.md` §5.2 specifies, against the real
-`VerifierProxy` at a finalized historical block, and against return shapes the real verifier will not
-produce. **Nothing about rounds.** No outcome is derived, no price is taken as input, and no
-settlement occurs.
+- **Type B2, the library against the real verifier.** `test/RoundSettlementFork.t.sol` forks Monad
+  testnet at block 62922075, leaves Chainlink's `VerifierProxy` in place, and runs the mandatory real
+  report through `RoundSettlement.check()`: accepted at its boundary with the widened window intact,
+  rejected one second either side, rejected one second past `expiresAt` although the real verifier
+  itself still accepts it, and rejected when a signed byte is flipped. The verifier's runtime keccak256
+  is asserted against `SPEC.md:78`. Passed through QuickNode and through Monad Foundation.
+- **Type B1, the verifier's answer directly.** `script/probe-archive.mjs` reads the proxy through two
+  operators at that block, gates on its runtime code hash, and requires byte-identical returns.
+- **Type A, everything else.** Return shapes the real verifier will not produce, driven by a mock
+  placed at the pinned address; the 24-row case corpus evaluated by two independent implementations;
+  and the whole of `MakoRoundsV1`: lifecycle, entry, exact-token semantics, fees, conservation,
+  refunds, claims, treasury and reentrancy. No transaction has been sent to any chain.
 
 ## What this does not prove, and who owns it
 
 | Not proven here | Owner |
 |---|---|
-| A settlement outcome (UP / DOWN / Tie) | T1.1 |
-| `block.timestamp >= observationsTimestamp`, rejecting a future observation | T1.1 |
-| An independent cross-check of a settled answer against another oracle | T1.1 |
-| A real on-chain settlement transaction | T1.1, and T2.0 for the keeper path |
-| Round lifecycle, fees, conservation | T1.1, T1.2 |
+| Any Type C claim: a real settlement transaction, read back against its report bytes (§6) | T1.1 on deployment; T2.0 for the keeper path |
+| An independent cross-check of a settled answer against another oracle (§2) | T1.1, per the `TASKS.md` exception |
+| `onReport`, the CRE delivery path: unbuilt until the forwarder's metadata layout is pinned | T2.0 |
+| Deploy-script assertions on the USDC and verifier addresses and code hashes (N16, N22) | T1.1 deployment |
 | Keeper liveness and censorship disclosure | T2.0 |
-| Capacity at the maximum concurrent round count | T0.1c, T1.2 |
+| Capacity at the maximum concurrent round count, which sets `MAX_ACTIVE_ROUNDS` | T0.1c |
+
+Built on this branch and evidenced at Type A, so no longer on that list: the settlement outcome, the
+rejection of a future observation, the round lifecycle, fees and conservation, refunds, claims and
+the treasury path.
 
 ## Retained trust, which Mako does not hold
 
@@ -44,8 +63,18 @@ settlement occurs.
   fee defence is `s_feeManager()` being zero on the pinned verifier. Measured on the mandatory
   fixture: `nativeFee` 132,915,204,253,287 wei and `linkFee` 29,384,890,485,513,791.
 - **`VerifierProxy.verify` does not enforce expiry.** Measured 2026-09-22: a report three days past
-  `expiresAt` still returned 352 bytes at `latest`. SPEC §5.2 step 7 is the only expiry defence
-  anywhere in this system, which is why its mutation rows are load-bearing rather than routine.
+  `expiresAt` still returned 352 bytes at `latest`, and confirmed on the fork: one second past
+  `expiresAt` the real verifier accepts the report and only the library's step 7 rejects it. SPEC §5.2
+  step 7 is the only expiry defence anywhere in this system.
+- **A full report is malleable, so its hash is not canonical.** Found by the fork suite on 2026-09-24.
+  `rawVs` packs one recovery byte per signature and this report carries two, so bytes 194 to 223 are
+  verified by nothing: changing one yields a different byte string that verifies to the IDENTICAL
+  report (`test_UnusedSignaturePaddingIsMalleable`). Money and outcome are unaffected, since only the
+  verified return is decoded (N26 holds). But `MakoRoundsV1` stores and emits `keccak256` of the
+  SUBMITTED bytes, as SPEC §5.3 specifies, so a settler can make the on-chain evidence hash differ
+  from the hash of the report as Data Streams serves it. A watchdog must match reports by their
+  verified fields, never by that hash. Changing what is hashed would change the spec, so it is
+  recorded here for a decision rather than changed.
 
 ## Untrusted inputs
 
@@ -86,7 +115,7 @@ a genuine widened window is rare and no mock can substitute for it.
 would accept it. **The committed bytes are the only copy after that**, which is why they are vendored
 and checksummed rather than fetched on demand.
 
-### 1b. Verification evidence (Type B1, two distinct operators)
+### 1b. The verifier's answer, directly (Type B1, two distinct operators)
 
 | | |
 |---|---|
@@ -99,8 +128,26 @@ and checksummed rather than fetched on demand.
 | Raw return | 352 bytes: envelope offset 32, length 288, payload 288 |
 | Payload sha256 | `be8b5132423d7e7926f2bdc50917d000a1b0dbde49db8d01a78be57d94b410ef`, **identical from both** |
 | Verifier identity | chain id 10143, `VerifierProxy 2.0.0`, 7,009 bytes, `s_feeManager` 0, `s_accessController` 0, on both |
-| Evidence | `test/fixtures/datastreams/evidence/archive-probe-2026-09-23T15-44-45-628Z/RESULT.json` |
+| Verifier code | runtime sha256 `246be742ffcc522f72309f1f42c77817af4d6f823969ce9e5763f2a9327ca231`, **GATED**: a mismatch is `VERIFICATION_MISMATCH`. Tied to `SPEC.md:78`'s keccak256 by computing both from the same bytes on both operators |
+| Evidence | `evidence/archive-probe-2026-09-24T19-10-24-255Z/RESULT.json`, the first run that gates on the code hash; the 2026-09-23 runs checked length only |
 | Command | `MAKO_RPC_A=… MAKO_RPC_B=… node script/probe-archive.mjs --as-proof` |
+
+**The code-hash gate is proven to fail**, not only to pass: run with a wrong pinned hash, both
+providers report `DOES NOT MATCH THE PIN` and the probe exits 3 with `VERIFICATION_MISMATCH`.
+
+### 1c. The shipping library against the real verifier (Type B2, two distinct operators)
+
+| | |
+|---|---|
+| Test | `test/RoundSettlementFork.t.sol`, 7 tests, env-guarded by `MAKO_FORK_RPC` |
+| Fork | Monad testnet, block **62922075**, timestamp 1789529160, `--network monad` |
+| Result | **7 passed** through QuickNode, **7 passed** through Monad Foundation |
+| Evidence | `evidence/fork-b2-*/quicknode.txt` and `monad-foundation.txt`, with traces |
+| `check()` gas | **88,695**, real verifier, cold access, against a 150,000 ceiling |
+
+It includes `test_AcceptsWindowEndingAtBoundary`, the test `INVARIANTS.md:12` names, on the real
+report it requires. **Offline CI SKIPS these tests, visibly, and a skipped test is not a passing one.**
+The B2 claim rests on the recorded runs above, not on CI.
 
 **The block timestamp equals `max(observationsTimestamp)` exactly**, so the plan's containment bound
 `max(obs) <= blockTimestamp <= min(expiresAt)` holds at the earliest possible point and `vm.warp` has
@@ -334,8 +381,9 @@ emits none, so §8's event and log-index clause does not apply to it.
 
 No deployment. The contract being **read** is identified before its answers are trusted: address
 `0x72790f9eB82db492a7DDb6d2af22A270Dcc3Db64`, chain id 10143, `VerifierProxy 2.0.0`, 7,009 bytes of
-runtime code, `s_feeManager` and `s_accessController` both zero, asserted on every probe run and in
-the fork test.
+runtime code identified by its hash (keccak256 against `SPEC.md:78` in the fork test, SHA-256 of the
+same bytes in the probe), `s_feeManager` and `s_accessController` both zero. Before 2026-09-24 the probe
+checked only the code length and no fork test existed; both gaps were found by the Codex diff review.
 
 ---
 
@@ -376,6 +424,10 @@ node script/mutate-solidity.mjs
 MAKO_RPC_A=https://testnet-rpc.monad.xyz/ \
 MAKO_RPC_B=https://rpc-testnet.monadinfra.com \
   node script/probe-archive.mjs --as-proof
+
+# Type B2, network, no credentials; run once per operator
+MAKO_FORK_RPC=https://testnet-rpc.monad.xyz/     forge test --network monad --match-contract RoundSettlementFork -vvv
+MAKO_FORK_RPC=https://rpc-testnet.monadinfra.com forge test --network monad --match-contract RoundSettlementFork -vvv
 ```
 
 Tool versions are recorded per run in the evidence files. Node is pinned by `.nvmrc`; the scripts are

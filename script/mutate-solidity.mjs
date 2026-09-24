@@ -474,6 +474,15 @@ const MUTATIONS = [
     from: '        _activeIds.pop();',
     to: '        // mutated: pop removed',
   },
+  // ---- Codex diff review r1 fixes ----
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest',
+    name: 'rounds: accept a start time whose close boundary overflows uint32',
+    clause: 'SPEC 5.2 boundary representation',
+    from: 'if (startTime > type(uint32).max - DURATION) revert StartTimeOutOfRange();',
+    to: '// mutated: uint32 bound removed',
+    note: 'An unserviceable round would be accepted and forced onto NoPrice a day later.',
+  },
 ];
 
 const sources = new Map();

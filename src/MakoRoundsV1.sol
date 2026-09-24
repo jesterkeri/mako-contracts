@@ -262,9 +262,14 @@ contract MakoRoundsV1 {
     /// seconds and both report hashes are stored AND emitted on every settlement, a tie included.
     /// @dev A separate event rather than `RoundSettled` with no outcome, so a consumer can never read
     /// a refunded round as settled. Emitted immediately before `RoundRefunded(roundId, Tie)`.
+    ///
+    /// Both prices are carried although a tie means they are equal. SPEC §5.3 and N14 require both,
+    /// and a uniform evidence schema means a later change to the tie condition cannot hide behind a
+    /// single field. The first draft emitted one price; the Codex diff review caught it.
     event RoundTied(
         uint256 indexed roundId,
-        int192 price,
+        int192 anchorPrice,
+        int192 closePrice,
         uint32 anchorObservedAt,
         uint32 closeObservedAt,
         bytes32 anchorReportHash,
@@ -291,6 +296,7 @@ contract MakoRoundsV1 {
     error StartTimeNotOnBoundary();
     error LeadTooShort();
     error LeadTooLong();
+    error StartTimeOutOfRange();
     error CreatorHasActiveRound();
     error TooManyActiveRounds();
     error NoSuchRound();
@@ -425,6 +431,13 @@ contract MakoRoundsV1 {
         // cannot widen the window.
         if (startTime < openTime + MIN_LEAD) revert LeadTooShort();
         if (startTime > openTime + MAX_LEAD) revert LeadTooLong();
+        // Report timestamps are uint32 (`RoundSettlement.check` takes a uint32 boundary, matching
+        // the report's own `observationsTimestamp`), and settlement narrows both boundaries to
+        // uint32. A round whose close boundary does not fit could never match a real report and
+        // would be forced onto the NoPrice refund path a day later, so it is refused here instead.
+        // Unreachable until 2106, but the contract should reject an unserviceable round rather than
+        // accept it. Found by the Codex diff review.
+        if (startTime > type(uint32).max - DURATION) revert StartTimeOutOfRange();
 
         if (creatorActiveRound[msg.sender] != 0) revert CreatorHasActiveRound();
         if (_activeIds.length >= MAX_ACTIVE_ROUNDS) revert TooManyActiveRounds();
@@ -620,10 +633,11 @@ contract MakoRoundsV1 {
             r.status = Status.Refunded;
             r.refundReason = RefundReason.Tie;
             // The evidence is emitted, not only stored: an adversarial review found the tie branch
-            // emitting nothing but the refund reason. Both prices are equal, so one is enough.
+            // emitting nothing but the refund reason.
             emit RoundTied(
                 roundId,
                 anchor.price,
+                close.price,
                 anchor.observationsTimestamp,
                 close.observationsTimestamp,
                 r.anchorReportHash,

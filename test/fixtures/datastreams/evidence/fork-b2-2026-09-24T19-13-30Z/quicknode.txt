@@ -1,0 +1,18 @@
+Compiling 1 files with Solc 0.8.24
+Solc 0.8.24 finished in 6.45s
+Compiler run successful!
+
+Ran 7 tests for test/RoundSettlementFork.t.sol:RoundSettlementForkTest
+[PASS] test_AcceptsWindowEndingAtBoundary() (gas: 160618)
+[PASS] test_CheckStaysUnderItsGasCeiling() (gas: 161964)
+Logs:
+  check() gas, real verifier, cold: 88695
+
+[PASS] test_ExpiryIsEnforcedByTheLibraryNotTheVerifier() (gas: 391213)
+[PASS] test_ForkIsTheRealVerifierAtThePinnedBlock() (gas: 74738)
+[PASS] test_RejectsOneSecondEarlyAndLate() (gas: 281789)
+[PASS] test_TamperedReportIsRejectedByTheRealVerifier() (gas: 139503)
+[PASS] test_UnusedSignaturePaddingIsMalleable() (gas: 291577)
+Suite result: ok. 7 passed; 0 failed; 0 skipped; finished in 5.65s (16.69s CPU time)
+
+Ran 1 test suite in 5.65s (5.65s CPU time): 7 tests passed, 0 failed, 0 skipped (7 total tests)

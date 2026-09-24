@@ -1349,6 +1349,7 @@ contract MakoRoundsV1Test is Test {
         emit MakoRoundsV1.RoundTied(
             roundId,
             100e18,
+            100e18,
             uint32(startTime),
             uint32(closeTime),
             keccak256(_anchorBytes()),
@@ -1356,6 +1357,25 @@ contract MakoRoundsV1Test is Test {
             address(this)
         );
         rounds.settle(roundId, _anchorBytes(), _closeBytes());
+    }
+
+    /// @notice A round whose close boundary would not fit a uint32 report timestamp is refused at
+    /// scheduling, rather than accepted and forced onto the NoPrice path a day later. At the largest
+    /// minute-aligned start that fits, it is accepted; one minute later, refused.
+    function test_StartTimeMustFitAUint32ReportTimestamp() public {
+        uint64 lastOk = uint64(type(uint32).max - 900);
+        lastOk -= lastOk % 60;
+        address[] memory one = new address[](1);
+        one[0] = outsider;
+        MakoRoundsV1 fresh = new MakoRoundsV1(TREASURY, address(usdc), one);
+
+        vm.warp(lastOk - 3600);
+        vm.prank(outsider);
+        vm.expectRevert(MakoRoundsV1.StartTimeOutOfRange.selector);
+        fresh.schedule(lastOk + 60);
+
+        vm.prank(outsider);
+        fresh.schedule(lastOk);
     }
 
     /// @notice A verifier that re-enters `settle` is refused, so a round cannot settle twice and the
