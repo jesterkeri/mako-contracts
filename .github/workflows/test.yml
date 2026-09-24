@@ -52,6 +52,9 @@ jobs:
       - name: Reference implementation agrees with the corpus
         run: node script/rule-reference.mjs
 
+      - name: Missing or failed evidence fails the reference, never skips it
+        run: node script/test-rule-reference.mjs
+
       - name: Every SPEC 5.2 clause is load-bearing (reference implementation)
         run: node script/mutate-reference.mjs
 

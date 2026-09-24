@@ -606,15 +606,18 @@ contract MakoRoundsV1 {
         RoundSettlement.Report memory close = RoundSettlement.check(closeReport, uint32(closeTime));
 
         // --- the check the library deliberately does not make -----------------------------------
-        // `RoundSettlement` takes no current-time input, so it accepts a report observed in the
-        // future. Here it is rejected. It is implied by the guards above, since both boundaries are
-        // at or before `closeTime` and `block.timestamp >= closeTime`, but it is asserted rather
-        // than inferred so it survives any later change to those guards and so the property has a
-        // test of its own. `VERIFICATION.md` hands this to T1.1 by name.
-        if (
-            uint256(anchor.observationsTimestamp) > block.timestamp
-                || uint256(close.observationsTimestamp) > block.timestamp
-        ) revert ObservationInFuture();
+        // `RoundSettlement` takes no current-time input, so on its own it would accept a report
+        // observed in the future.
+        //
+        // ON THIS PATH IT IS UNREACHABLE, and the proof record says so rather than claiming a test
+        // that cannot fire. The library requires each report to be observed at EXACTLY its boundary
+        // (`startTime`, `closeTime`), and `block.timestamp >= closeTime` was required above, so both
+        // observations are already at or before now. A report from a future second fails earlier, as
+        // `WrongObservationTime`. The Codex diff review showed that the first test named for this
+        // guard could never observe it. So the public-path property is DERIVED from the boundary
+        // check plus the settlement-time guard, both of which are tested and mutated, and this line
+        // is retained defence in depth, proven directly on its own through `_requireObservedBy`.
+        _requireObservedBy(anchor.observationsTimestamp, close.observationsTimestamp);
 
         // --- outcome, derived and never supplied -------------------------------------------------
         r.anchorPrice = anchor.price;
@@ -825,6 +828,16 @@ contract MakoRoundsV1 {
     }
 
     // ---------------------------------------------------------------------------------------------
+
+    /// @dev Defence in depth behind the boundary check: no observation may be after the current block.
+    /// Unreachable through `settle` today (see the call site). Internal rather than private so a test
+    /// harness can exercise it directly, which is the only way a guard that the public path cannot
+    /// reach gets a test that can actually fail.
+    function _requireObservedBy(uint32 anchorObservedAt, uint32 closeObservedAt) internal view {
+        if (uint256(anchorObservedAt) > block.timestamp || uint256(closeObservedAt) > block.timestamp) {
+            revert ObservationInFuture();
+        }
+    }
 
     function _existing(uint256 roundId) private view returns (Round storage r) {
         r = _rounds[roundId];

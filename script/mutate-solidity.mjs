@@ -483,6 +483,14 @@ const MUTATIONS = [
     to: '// mutated: uint32 bound removed',
     note: 'An unserviceable round would be accepted and forced onto NoPrice a day later.',
   },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest',
+    name: 'rounds: remove the retained future-observation guard',
+    clause: 'PROOF_STANDARD 10, defence in depth',
+    from: 'if (uint256(anchorObservedAt) > block.timestamp || uint256(closeObservedAt) > block.timestamp) {',
+    to: 'if (false) {',
+    note: 'Unreachable through settle; killed only by the direct harness test, which is the point of it.',
+  },
 ];
 
 const sources = new Map();

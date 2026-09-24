@@ -38,6 +38,7 @@ contract RoundSettlementForkTest is Test {
 
     /// The mandatory widened-window fixture and the block whose timestamp is its observation second.
     uint256 internal constant FORK_BLOCK = 62922075;
+    bytes32 internal constant FORK_BLOCK_HASH = 0x73f54743b7db644c8f010e74f422107337b586b59fed5a91916f98b384a722d6;
     uint32 internal constant B = 1789529160; // 2026-09-16 03:26:00 UTC
     uint32 internal constant VALID_FROM = 1789529157; // 03:25:57, a genuine three-second window
     uint32 internal constant EXPIRES_AT = 1792121160; // exactly 30 days after observation
@@ -56,9 +57,21 @@ contract RoundSettlementForkTest is Test {
     bytes internal fullReport;
     bool internal forked;
 
+    /// @dev The provider's hash for the pinned block, read through the EVM's BLOCKHASH opcode from a fork
+    /// at the NEXT block (BLOCKHASH of the current block is always zero). Checked in `setUp`, so every
+    /// test in this suite depends on the provider serving the pinned block and not merely a block at
+    /// that height with the right timestamp. Added after the Codex diff review found the B2 evidence
+    /// recorded no block hash.
+    bytes32 internal servedBlockHash;
+
     function setUp() public {
         string memory rpc = vm.envOr("MAKO_FORK_RPC", string(""));
         if (bytes(rpc).length == 0) return; // each test skips visibly below
+
+        vm.createSelectFork(rpc, FORK_BLOCK + 1);
+        servedBlockHash = blockhash(FORK_BLOCK);
+        require(servedBlockHash == FORK_BLOCK_HASH, "provider served a different block at the pinned height");
+
         vm.createSelectFork(rpc, FORK_BLOCK);
         forked = true;
 
@@ -80,6 +93,8 @@ contract RoundSettlementForkTest is Test {
     function test_ForkIsTheRealVerifierAtThePinnedBlock() public onFork {
         assertEq(block.chainid, 10143, "not Monad testnet");
         assertEq(block.number, FORK_BLOCK, "not the pinned block");
+        emit log_named_bytes32("pinned block hash, as served", servedBlockHash);
+        assertEq(servedBlockHash, FORK_BLOCK_HASH, "block hash differs from the pinned hash");
         assertEq(block.timestamp, B, "the pinned block's timestamp is the observation second");
 
         assertEq(VERIFIER.code.length, 7009, "runtime code length");

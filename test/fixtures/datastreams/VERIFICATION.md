@@ -46,8 +46,17 @@ block deployment.
 | Capacity at the maximum concurrent round count, which sets `MAX_ACTIVE_ROUNDS` | T0.1c |
 
 Built on this branch and evidenced at Type A, so no longer on that list: the settlement outcome, the
-rejection of a future observation, the round lifecycle, fees and conservation, refunds, claims and
-the treasury path.
+round lifecycle, fees and conservation, refunds, claims and the treasury path.
+
+**The future-observation rejection, stated precisely,** because the first version of this record
+overstated it. On the public `settle` path a report from a future second is rejected by the library's
+boundary check, as `WrongObservationTime`, and the contract's own `ObservationInFuture` guard is
+UNREACHABLE: the library requires each observation to equal its boundary exactly, and `settle` requires
+`block.timestamp >= closeTime`, so both observations are already at or before now. So the public-path
+property is DERIVED from those two checks, both tested and mutated
+(`test_FutureBoundaryReportIsRejectedAtTheBoundaryCheck`). The retained guard is defence in depth, proven
+directly through a test harness (`test_FutureObservationGuardRejectsDirectly`) and by its own mutation.
+The test that once claimed to prove it could not reach it; the Codex diff review caught that.
 
 ## Retained trust, which Mako does not hold
 
@@ -141,8 +150,9 @@ providers report `DOES NOT MATCH THE PIN` and the probe exits 3 with `VERIFICATI
 |---|---|
 | Test | `test/RoundSettlementFork.t.sol`, 7 tests, env-guarded by `MAKO_FORK_RPC` |
 | Fork | Monad testnet, block **62922075**, timestamp 1789529160, `--network monad` |
-| Result | **7 passed** through QuickNode, **7 passed** through Monad Foundation |
-| Evidence | `evidence/fork-b2-*/quicknode.txt` and `monad-foundation.txt`, with traces |
+| Block hash | `0x73f54743…a722d6`, read from EACH provider through BLOCKHASH at block 62922076 and REQUIRED in `setUp`, so every test depends on the provider serving the pinned block. A wrong pin fails setUp; shown |
+| Result | **7 passed** through QuickNode, **7 passed** through Monad Foundation, both serving the pinned hash |
+| Evidence | `evidence/fork-b2-2026-09-24T20-49-26Z/`, with traces. The earlier `fork-b2-2026-09-24T19-13-30Z` run did not check the block hash and is marked superseded |
 | `check()` gas | **88,695**, real verifier, cold access, against a 150,000 ceiling |
 
 It includes `test_AcceptsWindowEndingAtBoundary`, the test `INVARIANTS.md:12` names, on the real
@@ -180,6 +190,14 @@ it would qualify today. It is not re-run because the credential-free pair alread
 
 **T0.1 claims §2's independent computation OF THE RULE, and nothing more.** The settlement-answer
 computation and the oracle cross-check are T1.1's, per the `TASKS.md` exception.
+
+**The real row is evaluated against ONE pinned B1 record.** `CASES.json` pins the record and the vendored
+fixture by path and SHA-256; the reference itself requires the record to be `VERIFIED_MATCH`,
+`two-distinct-operators`, for block 62922075 with its hash and timestamp, with two byte-identical
+returns. Anything else is a FAILURE of the real row and a non-zero exit, never a skip. The first version
+took whichever archive-probe directory sorted last, so a later failed run silently dropped the mandatory
+row while the gate still exited 0; the Codex diff review caught it. `script/test-rule-reference.mjs`
+proves the new behaviour across nine scenarios, including exactly that one, and runs in CI.
 
 Two implementations, sharing no code, both driven from `test/fixtures/rule-cases/CASES.json` as
 **data**:

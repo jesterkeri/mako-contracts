@@ -21,7 +21,8 @@
 // A row where this implementation and the corpus disagree is a finding in one of them, and which
 // one is a question for review, not for whichever is more convenient.
 
-import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -125,41 +126,61 @@ function evaluate({ feeManager, verifierBehaviour, returnData, boundary, blockTi
   return { verdict: 'accept', report: r, reachedVerify: true, atStep: 7 };
 }
 
-// ---- the real row's verified return comes from the recorded Type B1 evidence ----
-// The corpus cannot carry a verified return for the real fixture: producing one requires the real
-// verifier. So the real row is evaluated against the bytes the archive probe recorded, which is a
-// Version 3 Type B1 claim, and the run it came from is named in the output.
-function realVerifiedReturn() {
-  const dir = join(REPO, 'test/fixtures/datastreams/evidence');
-  if (!existsSync(dir)) return { unavailable: 'no evidence directory' };
-  const runs = readdirSync(dir).filter((d) => d.startsWith('archive-probe-')).sort();
-  if (!runs.length) return { unavailable: 'no archive-probe run recorded' };
-  const latest = runs[runs.length - 1];
-  const res = JSON.parse(readFileSync(join(dir, latest, 'RESULT.json'), 'utf8'));
-  if (res.status !== 'VERIFIED_MATCH') return { unavailable: `latest archive probe status is ${res.status}` };
-  const first = Object.values(res.providers)[0];
-  return {
-    returnData: first.rawResult,
-    run: latest,
-    proofLevel: res.proofLevel,
-    blockTimestamp: res.target.blockTimestamp,
-    boundary: res.target.observationsTimestamp,
-  };
+// ---- the real row's verified return comes from ONE PINNED Type B1 record ----
+// The corpus cannot carry a verified return for the real fixture: producing one needs the real verifier.
+// So the real row is evaluated against a B1 record, and that record is PINNED by path and checksum in the
+// corpus. The FIRST version took whichever archive-probe directory sorted last, so a later failed run, or
+// no evidence at all, turned the mandatory row into a skip while this gate still exited 0. The Codex diff
+// review caught it: unavailable evidence is an UNMET claim, never a bypass (PROOF_STANDARD §11).
+//
+// What the record must say is hardcoded HERE, independently of the generator, so the corpus cannot
+// quietly relax it:
+const REQUIRED = {
+  status: 'VERIFIED_MATCH',
+  proofLevel: 'two-distinct-operators',
+  block: 62922075,
+  blockHash: '0x73f54743b7db644c8f010e74f422107337b586b59fed5a91916f98b384a722d6',
+  blockTimestamp: 1789529160,
+};
+
+function sha256File(abs) {
+  return createHash('sha256').update(readFileSync(abs)).digest('hex');
+}
+
+function realVerifiedReturn(corpus) {
+  const pin = corpus._realEvidence;
+  if (!pin || !pin.record || !pin.fixture) return { failed: 'the corpus pins no B1 record' };
+  for (const f of [pin.record, pin.fixture]) {
+    const abs = join(REPO, f.path);
+    if (!existsSync(abs)) return { failed: `pinned file missing: ${f.path}` };
+    const got = sha256File(abs);
+    if (got !== f.sha256) return { failed: `pinned file changed: ${f.path} sha256 ${got.slice(0, 12)}... != pinned ${f.sha256.slice(0, 12)}...` };
+  }
+  const res = JSON.parse(readFileSync(join(REPO, pin.record.path), 'utf8'));
+  if (res.status !== REQUIRED.status) return { failed: `pinned record status is ${res.status}, not ${REQUIRED.status}` };
+  if (res.proofLevel !== REQUIRED.proofLevel) return { failed: `pinned record proofLevel is ${res.proofLevel}, not ${REQUIRED.proofLevel}` };
+  if (res.target?.block !== REQUIRED.block || res.target?.blockHash !== REQUIRED.blockHash || res.target?.blockTimestamp !== REQUIRED.blockTimestamp) {
+    return { failed: 'pinned record is not for the pinned block, hash and timestamp' };
+  }
+  const returns = Object.values(res.providers || {}).map((p) => p.rawResult);
+  if (returns.length !== 2 || !returns[0] || returns[0] !== returns[1]) return { failed: 'pinned record lacks two byte-identical verified returns' };
+  return { returnData: returns[0], run: pin.record.path, proofLevel: res.proofLevel };
 }
 
 // ---- run the corpus ----
 const corpus = JSON.parse(readFileSync(join(REPO, 'test/fixtures/rule-cases/CASES.json'), 'utf8'));
-const real = realVerifiedReturn();
+const real = realVerifiedReturn(corpus);
 
 const rows = [];
-let agreed = 0, disagreed = 0, skipped = 0;
+let agreed = 0, disagreed = 0, failed = 0;
 
 for (const c of corpus.cases) {
   let input;
   if (c.source === 'real') {
-    if (real.unavailable) {
-      rows.push({ id: c.id, status: 'SKIPPED', why: real.unavailable });
-      skipped++;
+    if (real.failed) {
+      // A FAILURE, never a skip. The mandatory real row cannot be silently dropped from this half of §2.
+      rows.push({ id: c.id, status: 'FAILED', why: real.failed });
+      failed++;
       continue;
     }
     input = { feeManager: c.verifier.feeManager, verifierBehaviour: 'return', returnData: real.returnData, boundary: c.boundary, blockTimestamp: c.warpTo };
@@ -194,22 +215,22 @@ if (JSON_OUT) {
     evaluatedAt: new Date().toISOString(),
     implementation: 'script/rule-reference.mjs',
     corpusVersion: corpus._version,
-    realRowEvidence: !real.unavailable ? { run: real.run, proofLevel: real.proofLevel } : null,
-    totals: { agreed, disagreed, skipped },
+    realRowEvidence: !real.failed ? { run: real.run, proofLevel: real.proofLevel } : null,
+    totals: { agreed, disagreed, failed },
     rows,
   }, null, 2));
-  process.exit(disagreed === 0 ? 0 : 1);
+  process.exit(disagreed === 0 && failed === 0 ? 0 : 1);
 }
 
 console.log(`SPEC 5.2 reference implementation against CASES.json v${corpus._version}\n`);
 for (const r of rows) {
-  const mark = r.status === 'AGREES' ? ' ok ' : r.status === 'SKIPPED' ? 'skip' : 'FAIL';
-  console.log(`  [${mark}] ${r.id.padEnd(42)} ${r.status === 'SKIPPED' ? r.why : `expected ${String(r.expected).padEnd(26)} got ${r.got}`}`);
+  const mark = r.status === 'AGREES' ? ' ok ' : 'FAIL';
+  console.log(`  [${mark}] ${r.id.padEnd(42)} ${r.status === 'FAILED' ? r.why : `expected ${String(r.expected).padEnd(26)} got ${r.got}`}`);
   if (r.status === 'DISAGREES' && r.why) console.log(`         why: ${r.why}`);
 }
-console.log(`\n  ${agreed} agree, ${disagreed} disagree, ${skipped} skipped`);
-if (!real.unavailable) console.log(`  real row evaluated from ${real.run} (proofLevel: ${real.proofLevel})`);
+console.log(`\n  ${agreed} agree, ${disagreed} disagree, ${failed} failed`);
+if (!real.failed) console.log(`  real row evaluated from ${real.run} (proofLevel: ${real.proofLevel})`);
 console.log(`\n  This is ONE of the two implementations PROOF_STANDARD.md Version 3 section 2 requires.`);
-console.log(`  It is not evidence on its own: the Solidity side must evaluate the same rows and the`);
-console.log(`  two verdicts must then be compared. src/RoundSettlement.sol does not exist yet.`);
-process.exit(disagreed === 0 ? 0 : 1);
+console.log(`  The other is src/RoundSettlement.sol, evaluated on the same rows by test/RoundSettlement.t.sol`);
+console.log(`  (mock rows) and test/RoundSettlementFork.t.sol (the real row, against the real verifier).`);
+process.exit(disagreed === 0 && failed === 0 ? 0 : 1);

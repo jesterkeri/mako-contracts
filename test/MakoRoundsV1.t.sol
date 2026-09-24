@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {MakoRoundsV1} from "../src/MakoRoundsV1.sol";
+import {MakoRoundsV1Harness} from "./MakoRoundsV1Harness.sol";
 import {RoundSettlement} from "../src/RoundSettlement.sol";
 import {MockVerifier} from "./mocks/MockVerifier.sol";
 import {
@@ -330,26 +331,63 @@ contract MakoRoundsV1Test is Test {
         rounds.settle(roundId + 999, _anchorBytes(), _closeBytes());
     }
 
-    /// @notice The check the library deliberately does not make: a report observed after the settling
-    /// block is rejected. `RoundSettlement` takes no current-time input and would accept it.
-    /// @dev Reached by warping to `closeTime` while the round's own boundaries sit in the future,
-    /// which requires a round whose `closeTime` is behind us but whose reports claim a later second.
-    /// The guard is asserted directly rather than only implied by the timing guards, so it survives
-    /// a later change to them.
-    function test_ReportObservedInTheFutureIsRejected() public {
-        _twoSided(); // SPEC.md:135 forbids settling a one-sided round at all
-        // Settle-time guards satisfied, but the close report claims an observation after `now`.
-        // The boundary check fires first, which is itself the point: the two together make a
-        // future observation unreachable. Assert the ordering explicitly.
+    /// @notice A report whose observation is a FUTURE second is rejected on the public path, at the
+    /// library's boundary check, as `WrongObservationTime`.
+    /// @dev Renamed after the Codex diff review. It used to be called
+    /// `test_ReportObservedInTheFutureIsRejected` and implied it proved the contract's
+    /// `ObservationInFuture` guard, which it never reached: the boundary check fires first, and on this
+    /// path the guard is unreachable. The name now says what the test actually shows. The guard itself
+    /// is proven directly by `test_FutureObservationGuardRejectsDirectly`.
+    function test_FutureBoundaryReportIsRejectedAtTheBoundaryCheck() public {
+        _twoSided();
         _arm(_anchorBytes(), uint32(startTime), 100e18);
+        _arm(_closeBytes(), uint32(closeTime) + 600, 101e18);
+        vm.warp(closeTime);
+        vm.expectRevert(RoundSettlement.WrongObservationTime.selector);
+        rounds.settle(roundId, _anchorBytes(), _closeBytes());
+    }
+
+    /// @notice The retained future-observation guard, tested directly because no public path reaches it.
+    /// @dev Either observation one second after `block.timestamp` is refused; both at exactly now pass.
+    function test_FutureObservationGuardRejectsDirectly() public {
+        address[] memory one = new address[](1);
+        one[0] = creator;
+        MakoRoundsV1Harness h = new MakoRoundsV1Harness(TREASURY, address(usdc), one);
+        uint32 nowTs = uint32(block.timestamp);
+
+        h.exposed_requireObservedBy(nowTs, nowTs);
+
+        vm.expectRevert(MakoRoundsV1.ObservationInFuture.selector);
+        h.exposed_requireObservedBy(nowTs + 1, nowTs);
+
+        vm.expectRevert(MakoRoundsV1.ObservationInFuture.selector);
+        h.exposed_requireObservedBy(nowTs, nowTs + 1);
+    }
+
+    /// @notice The stored report hash is SUBMITTED-CALLDATA provenance, not a canonical report id.
+    /// @dev Two byte-distinct submissions that verify to the identical report settle a round identically
+    /// but store different `anchorReportHash` values. The real-verifier version of this property is
+    /// `test_UnusedSignaturePaddingIsMalleable` in the fork suite; this is the contract-level half, so a
+    /// watchdog or indexer can never be written on the assumption that the hash identifies a report.
+    function test_ReportHashIsSubmittedCalldataNotACanonicalId() public {
+        _twoSided();
+        bytes memory variant = hex"a0a0a1"; // a different byte string for the same verified anchor
+        _arm(_anchorBytes(), uint32(startTime), 100e18);
+        _arm(variant, uint32(startTime), 100e18);
         _arm(_closeBytes(), uint32(closeTime), 101e18);
         vm.warp(closeTime);
 
-        // A well-formed close report for a LATER round boundary is rejected on the boundary, not
-        // silently accepted.
-        _arm(_closeBytes(), uint32(closeTime) + 600, 101e18);
-        vm.expectRevert(RoundSettlement.WrongObservationTime.selector);
+        uint256 snap = vm.snapshotState();
         rounds.settle(roundId, _anchorBytes(), _closeBytes());
+        MakoRoundsV1.Round memory a = rounds.roundOf(roundId);
+        vm.revertToState(snap);
+        rounds.settle(roundId, variant, _closeBytes());
+        MakoRoundsV1.Round memory b = rounds.roundOf(roundId);
+
+        assertEq(uint256(a.outcome), uint256(b.outcome), "same outcome");
+        assertEq(a.anchorPrice, b.anchorPrice, "same verified anchor price");
+        assertTrue(a.anchorReportHash != b.anchorReportHash, "different stored hash for the same verified report");
+        assertEq(b.anchorReportHash, keccak256(variant), "the hash is of exactly what was submitted");
     }
 
     // ---------------------------------------------------------------------------------------------

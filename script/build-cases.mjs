@@ -350,12 +350,27 @@ const index = {
   mustNotPanicIds: built.filter((c) => c.expect.mustNotPanic).map((c) => c.id),
 };
 
+// ---- the B1 record the real row is evaluated against, PINNED rather than discovered ----
+// The reference used to take whichever archive-probe directory sorted last. The Codex diff review showed
+// that a later FAILED probe run, or a missing evidence directory, then turned the mandatory real row into
+// a skip while the gate still exited 0. So the record is named here, by path and checksum, and the
+// reference refuses anything else.
+const PINNED_B1 = 'test/fixtures/datastreams/evidence/archive-probe-2026-09-24T19-10-24-255Z/RESULT.json';
+const PINNED_FIXTURE = 'test/fixtures/datastreams/pending/btcusd-1789529160.json';
+function pinFile(rel) {
+  const abs = join(REPO, rel);
+  if (!existsSync(abs)) throw new Error(`pinned evidence missing: ${rel}`);
+  return { path: rel, sha256: sha256(readFileSync(abs)) };
+}
+const realEvidence = { record: pinFile(PINNED_B1), fixture: pinFile(PINNED_FIXTURE) };
+
 const corpus = {
   _version: 1,
   _generatedBy: 'script/build-cases.mjs',
   _authorship: 'Every expected verdict and selector is authored by hand from SPEC 5.2. The generator encodes declared field values into bytes and never computes an expected result.',
   _encoderGroundTruth: groundTruth(),
   _constants: { FEED_ID, MAX_SPREAD_BPS: Number(MAX_SPREAD_BPS), INT192_MAX: INT192_MAX.toString(), INT192_MIN: INT192_MIN.toString() },
+  _realEvidence: realEvidence,
   _impossibleCases: impossibleCases,
   _index: index,
   cases: built,

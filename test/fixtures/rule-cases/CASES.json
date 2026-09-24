@@ -14,6 +14,16 @@
     "INT192_MAX": "3138550867693340381917894711603833208051177722232017256447",
     "INT192_MIN": "-3138550867693340381917894711603833208051177722232017256448"
   },
+  "_realEvidence": {
+    "record": {
+      "path": "test/fixtures/datastreams/evidence/archive-probe-2026-09-24T19-10-24-255Z/RESULT.json",
+      "sha256": "6102260ca4b81436c7348463f2f8cf564bd4e7fab75782c3d6e85f0f83d7184d"
+    },
+    "fixture": {
+      "path": "test/fixtures/datastreams/pending/btcusd-1789529160.json",
+      "sha256": "615cfa45b5a32293b961d4badae80ed6435366f3f1bbb44450c6f7c3db1a2766"
+    }
+  },
   "_impossibleCases": [
     {
       "describedIn": "build plan r11 mutation table",
