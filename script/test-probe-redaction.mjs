@@ -12,6 +12,12 @@
 // the early provider-resolution failure path, and it proves the last-line guard by re-introducing the
 // original bug in a temp copy and requiring the probe to refuse to write.
 //
+// Round 5 of the Codex diff review found that a provider echoing the credential ON ITS OWN, rather than
+// the URL spelling of it, got past both the console scrubber and the evidence guard. The ATOM modes below
+// return each path and query credential alone: as error text, hex-encoded as a malformed result,
+// base64-encoded, percent-decoded, truncated into an address word, and as a block hash. The leak check
+// looks for any 10-character window of a credential too, since a truncated credential is still a leak.
+//
 // No network. The working tree is never modified.
 
 import { mkdtempSync, cpSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
@@ -22,7 +28,8 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
-const SENTINELS = ['SENTINELPATHKEYaaaa1111', 'SENTINELQUERYbbbb2222', 'SENTINELPATHKEYcccc3333', 'SENTINELQUERYdddd4444'];
+const SENTINELS = ['SENTINELPATHKEYaaaa1111', 'SENTINELQUERYbbbb2222', 'SENTINELPATHKEYcccc3333', 'SENTINELQUERYdddd4444',
+  'SENTINELQUERY+pct5555', 'SENTINELUSERffff6666', 'SENTINELPASSgggg7777'];
 
 // ---- a minimal JSON-RPC server answering the calls the probe makes ----
 // MODE makes the mock HOSTILE in the way the Codex diff review (round 4) described: a provider, gateway or
@@ -34,6 +41,7 @@ const abiString = (str) => {
   return '0x' + (32).toString(16).padStart(64, '0') + (hex.length / 2).toString(16).padStart(64, '0')
     + hex.padEnd(Math.ceil(hex.length / 64) * 64, '0');
 };
+const hexOf = (str) => Buffer.from(str).toString('hex');
 const server = createServer((req, res) => {
   let body = '';
   req.on('data', (c) => (body += c));
@@ -41,6 +49,31 @@ const server = createServer((req, res) => {
     const { id, method, params } = JSON.parse(body);
     const data = String(params?.[0]?.data || '');
     res.setHeader('content-type', 'application/json');
+    // The credentials of THIS request, as the provider sees them: the last path segment and the first
+    // query value, the latter percent-DECODED, which is how a server framework hands it to its code.
+    const u = new URL(req.url, 'http://mock');
+    const pathAtom = u.pathname.split('/').filter(Boolean).pop() || '';
+    const queryAtom = [...u.searchParams.values()][0] || '';
+    const isVerify = method === 'eth_call' && data.startsWith('0xf7e83aee');
+    const fail = (code, message) => res.end(JSON.stringify({ jsonrpc: '2.0', id, error: { code, message } }));
+    const ok = (result) => res.end(JSON.stringify({ jsonrpc: '2.0', id, result }));
+    if (isVerify && MODE === 'atom-error-path') return fail(-32000, `invalid key ${pathAtom}`);
+    if (isVerify && MODE === 'atom-error-query') return fail(3, `execution reverted: apikey ${queryAtom} unknown`);
+    if (isVerify && MODE === 'atom-base64-error') return fail(-32000, `denied ${Buffer.from(pathAtom).toString('base64')}`);
+    if (isVerify && MODE === 'atom-hex-malformed-path') return ok('0x' + hexOf(pathAtom));
+    if (isVerify && MODE === 'atom-hex-malformed-query') return ok('0x' + hexOf(queryAtom));
+    if (isVerify && MODE === 'atom-wellformed-query') {
+      // A well-formed 352-byte envelope whose 288-byte payload carries the credential. It IS recorded as
+      // evidence, so the last-line guard has to refuse it.
+      return ok('0x' + (32).toString(16).padStart(64, '0') + (288).toString(16).padStart(64, '0') + hexOf(queryAtom).padEnd(576, '0'));
+    }
+    if (MODE === 'atom-address' && method === 'eth_call' && data.startsWith('0x38416b5b')) {
+      // s_feeManager(): a 32-byte word ending in the credential, which a last-40-hex slice truncates.
+      return ok('0x' + hexOf(pathAtom).padStart(64, '0'));
+    }
+    if (MODE === 'atom-blockhash' && method === 'eth_getBlockByNumber') {
+      return ok({ number: '0x3c01d5b', hash: '0x' + hexOf(pathAtom).padEnd(64, '0'), timestamp: '0x6aaa0c48' });
+    }
     if (MODE === 'echo-revert' && method === 'eth_call' && data.startsWith('0xf7e83aee')) {
       // HTTP 200, JSON-RPC code 3, and the full request path and query in the message.
       res.end(JSON.stringify({ jsonrpc: '2.0', id, error: { code: 3, message: `execution reverted; upstream ${req.url}` } }));
@@ -105,9 +138,29 @@ async function runProbe(dir, env) {
 }
 
 // Plain AND hex-encoded, since a provider can return bytes that decode to the credential.
-const leaks = (text) => (text ? SENTINELS.filter((s) => text.includes(s) || text.toLowerCase().includes(Buffer.from(s).toString('hex'))) : []);
+// A leak is any 10-character window of a credential, plain or hex, or the whole credential in base64.
+function forms(secret) {
+  const out = new Set([Buffer.from(secret).toString('base64').replace(/=+$/, ''), encodeURIComponent(secret)]);
+  for (let i = 0; i + 10 <= secret.length; i++) {
+    const w = secret.slice(i, i + 10);
+    out.add(w.toLowerCase());
+    out.add(Buffer.from(w).toString('hex'));
+  }
+  return [...out];
+}
+const leaks = (text, extra = []) => {
+  if (!text) return [];
+  const lower = text.toLowerCase();
+  return [...SENTINELS, ...extra].filter((s) => s.length < 10
+    ? lower.includes(s.toLowerCase())
+    : forms(s).some((f) => lower.includes(f.toLowerCase())));
+};
 const urlA = `http://${HOST}/v2/${SENTINELS[0]}?apikey=${SENTINELS[1]}`;
 const urlB = `http://${HOST}/v2/${SENTINELS[2]}?apikey=${SENTINELS[3]}`;
+const both = { MAKO_RPC_MOCK_A: urlA, MAKO_RPC_MOCK_B: urlB };
+const clean = (r, extra) => leaks(r.resultText, extra).length === 0 && leaks(r.out, extra).length === 0;
+const written = (r, extra) => r.resultText !== null && clean(r, extra);
+const refusedAtConfig = (r, extra) => r.code === 2 && r.resultText !== null && clean(r, extra);
 
 const scenarios = [
   {
@@ -136,6 +189,54 @@ const scenarios = [
     env: { MAKO_RPC_MOCK_A: urlA, MAKO_RPC_MOCK_B: urlB },
     check: (r) => r.resultText !== null && leaks(r.resultText).length === 0 && leaks(r.out).length === 0,
   },
+  // ---- round 5: the credential on its own ----
+  { name: 'ATOM: path credential alone in a JSON-RPC error message', mode: 'atom-error-path', opts: {}, env: both, check: (r) => written(r) },
+  { name: 'ATOM: query credential alone in a code-3 revert message', mode: 'atom-error-query', opts: {}, env: both, check: (r) => written(r) },
+  { name: 'ATOM: path credential base64-encoded in an error message', mode: 'atom-base64-error', opts: {}, env: both, check: (r) => written(r) },
+  { name: 'ATOM: path credential hex-encoded as a malformed verify result', mode: 'atom-hex-malformed-path', opts: {}, env: both, check: (r) => written(r) },
+  { name: 'ATOM: query credential hex-encoded as a malformed verify result', mode: 'atom-hex-malformed-query', opts: {}, env: both, check: (r) => written(r) },
+  { name: 'ATOM: path credential truncated into an address word (s_feeManager)', mode: 'atom-address', opts: {}, env: both, check: (r) => written(r) },
+  { name: 'ATOM: path credential hex-encoded as the block hash', mode: 'atom-blockhash', opts: {}, env: both, check: (r) => written(r) },
+  {
+    name: 'ATOM: percent-encoded query credential echoed DECODED',
+    mode: 'atom-error-query',
+    opts: {},
+    env: { MAKO_RPC_MOCK_A: `http://${HOST}/v2/${SENTINELS[0]}?apikey=${encodeURIComponent(SENTINELS[4])}`, MAKO_RPC_MOCK_B: urlB },
+    check: (r) => written(r),
+  },
+  {
+    name: 'LAST-LINE GUARD: a WELL-FORMED return carrying the query credential is refused (exit 5)',
+    mode: 'atom-wellformed-query',
+    opts: {},
+    env: both,
+    check: (r) => r.code === 5 && r.resultText === null && clean(r),
+  },
+  {
+    name: 'CONFIG: a URL with user:password credentials is refused, and neither is printed',
+    opts: {},
+    env: { MAKO_RPC_MOCK_A: `http://${SENTINELS[5]}:${SENTINELS[6]}@${HOST}/v2/${SENTINELS[0]}`, MAKO_RPC_MOCK_B: urlB },
+    check: (r) => refusedAtConfig(r),
+  },
+  {
+    name: 'CONFIG: a short non-generic path segment is refused, not left unredacted',
+    opts: {},
+    env: { MAKO_RPC_MOCK_A: `http://${HOST}/v2/Kx9q2`, MAKO_RPC_MOCK_B: urlB },
+    extra: ['Kx9q2'],
+    check: (r) => refusedAtConfig(r, ['Kx9q2']),
+  },
+  {
+    name: 'CONFIG: a short query value is refused',
+    opts: {},
+    env: { MAKO_RPC_MOCK_A: `http://${HOST}/v2/${SENTINELS[0]}?apikey=Zp4w`, MAKO_RPC_MOCK_B: urlB },
+    extra: ['Zp4w'],
+    check: (r) => refusedAtConfig(r, ['Zp4w']),
+  },
+  {
+    name: 'CONFIG: a URL with a #fragment is refused',
+    opts: {},
+    env: { MAKO_RPC_MOCK_A: `http://${HOST}/v2/${SENTINELS[0]}#${SENTINELS[1]}`, MAKO_RPC_MOCK_B: urlB },
+    check: (r) => refusedAtConfig(r),
+  },
   {
     name: 'LAST-LINE GUARD: with the original bug put back, the probe refuses to write (exit 5)',
     opts: { reintroduceBug: true },
@@ -155,7 +256,7 @@ for (const sc of scenarios) {
     console.log(`  [${ok ? ' ok ' : 'FAIL'}] ${sc.name}`);
     if (!ok) console.log(r.out.split('\n').filter((l) => /Error|error|at /.test(l)).slice(0, 6).map((l) => `         | ${l}`).join('\n'));
     console.log(`         exit ${r.code}, evidence ${r.resultText === null ? 'NOT written' : 'written'}, sentinel leaks: ` +
-      `${leaks(r.resultText).length + leaks(r.out).length}`);
+      `${leaks(r.resultText, sc.extra).length + leaks(r.out, sc.extra).length}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -164,4 +265,5 @@ server.close();
 
 console.log(`\n  ${scenarios.length - bad} of ${scenarios.length} scenarios behaved as required.`);
 if (bad) process.exit(1);
-console.log('  No RPC URL path or query reaches evidence or console output, and the guard catches a regression.');
+console.log('  No credential, whole or in part, in any tested encoding, reaches evidence or console output,');
+console.log('  and the guard catches a regression.');

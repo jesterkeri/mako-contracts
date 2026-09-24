@@ -63,6 +63,37 @@ put the credential in a public log. And the secret scan exempted two tracked fil
   values into each formerly exempt file and a new file, requires failure without printing the value, and
   requires a placeholder to pass; against the round-4 scanner the formerly exempt cases fail the test.
 
+**Round 5 found it incomplete again, one layer in.** The guard and the scrubber knew only compound forms:
+the whole URL, its path and its query. A provider already holds the credential, so it can return the
+token on its own, with no "/v2/" or "?apikey=" around it, and a malformed `verify` result was recorded
+verbatim. A hex-encoded key returned as that result would have been written into evidence. Now:
+- **The redaction set is built from atoms.** Every path segment and query key or value, raw and
+  percent-decoded, each also percent-encoded, hex-encoded and base64-encoded, alongside the compound
+  forms. Matching is case-insensitive.
+- **A URL the probe cannot fully redact is refused before any call.** URLs with user:password
+  credentials or a #fragment are refused, and so is any path segment or query component shorter than
+  8 characters that is not a known generic part (`v2`, `rpc`, `apikey`...). A short credential is still a
+  credential. None of these refusal messages quotes the URL.
+- **Evidence keeps a provider value only if it equals its pin.** Chain id, the fee manager and access
+  controller addresses, `typeAndVersion`, and the block number, hash and timestamp are each recorded
+  verbatim only when they match the pinned value, and otherwise as `MISMATCH sha256:<hash>`. Before,
+  an address was the last 40 hex characters of whatever came back, so a hex-encoded key would have been
+  truncated into evidence, and no string guard catches a truncated key.
+- **A malformed `verify` return is recorded by hash and a fixed reason code only**, with no bytes and no
+  lengths. A return counts as well-formed only if it is exactly 352 bytes, offset 32, length 288. A
+  well-formed return is the evidence itself, so it is kept in full, and `writeEvidence` refuses it if it
+  carries any secret form.
+- `test-probe-redaction.mjs` has 18 scenarios. They cover each credential alone in error text, base64
+  in error text, hex as a malformed result, hex in a well-formed result (refused, exit 5), truncated into
+  an address word, as the block hash, and echoed percent-decoded, plus the four refused URL shapes. A
+  leak means any 10-character window of a credential, plain or hex, so a truncated key counts. **Against
+  the round-5 probe, 9 of the 18 fail**, including the exact case the review described.
+- **Out of scope, stated so nobody relies on it:** a provider that deliberately disguises the key it
+  holds, for example by interleaving or re-encoding its bytes, cannot be caught by any string guard. The
+  risk is limited by what evidence can hold: pinned-equal values, hashes, local categories, and a
+  well-formed verify return. The re-run on 2026-09-24 through QuickNode and Monad Foundation still
+  returned `VERIFIED_MATCH`, two distinct operators, with every identity value recorded verbatim.
+
 ## What this proves
 
 - **Type B2, the library against the real verifier.** `test/RoundSettlementFork.t.sol` forks Monad

@@ -41,7 +41,6 @@ const AS_PROOF = process.argv.includes('--as-proof');
 const CHAIN_ID = 10143;
 const VERIFIER = '0x72790f9eb82db492a7ddb6d2af22a270dcc3db64';
 const VERIFIER_CODE_HASH = '0x4bd86e898b2952f6f0d20fee037accf52490dbdd9279345cd4b0a7161b5c022b'; // keccak256, SPEC.md:78
-const VERIFIER_CODE_BYTES = 7009;
 
 // SHA-256 of the SAME runtime bytes whose keccak256 is `VERIFIER_CODE_HASH`. This script carries no
 // keccak implementation, so it gates on SHA-256 instead; the two are tied together by computing both
@@ -153,18 +152,19 @@ function isRevert(err) {
 }
 
 // ---- decode the 288-byte v3 payload out of the 352-byte ABI envelope ----
+//
+// A return is well-formed only if it is EXACTLY the envelope a v3 report produces: 352 bytes, offset 32,
+// length 288. Anything else is malformed, and a malformed return is described by a fixed reason code
+// alone: no lengths and no bytes, since every one of those is provider-chosen (round 5 of the Codex diff
+// review showed a malformed result carrying a hex-encoded credential into evidence).
 function decodeVerifyReturn(resultHex) {
-  const b = Buffer.from(resultHex.replace(/^0x/, ''), 'hex');
-  if (b.length < 64) return { ok: false, reason: `raw return is ${b.length} bytes, too short for an ABI envelope` };
+  if (typeof resultHex !== 'string' || !/^0x([0-9a-fA-F]{2})*$/.test(resultHex)) return { ok: false, reason: 'not-hex' };
+  const b = Buffer.from(resultHex.slice(2), 'hex');
+  if (b.length !== 352) return { ok: false, reason: 'not-352-bytes' };
   const offset = Number(BigInt('0x' + b.subarray(0, 32).toString('hex')));
   const length = Number(BigInt('0x' + b.subarray(32, 64).toString('hex')));
-  const payload = b.subarray(64, 64 + length);
-  // A payload that is not a full v3 report is RECORDED as malformed, not decoded. Decoding a short
-  // payload used to throw on `BigInt('0x')`, crashing the probe with no evidence written and no
-  // classification. Found by script/test-probe-redaction.mjs, whose mock returns an empty payload.
-  if (payload.length !== 288) {
-    return { ok: false, reason: `verified payload is ${payload.length} bytes, not 288`, rawBytes: b.length, envelopeLength: length, payloadBytes: payload.length };
-  }
+  if (offset !== 32 || length !== 288) return { ok: false, reason: 'not-a-288-byte-envelope' };
+  const payload = b.subarray(64, 352);
   const w = (i) => payload.subarray(i * 32, (i + 1) * 32);
   const u = (i) => BigInt('0x' + w(i).toString('hex'));
   const s = (i) => { const v = u(i); return v >> 255n ? v - (1n << 256n) : v; };
@@ -197,6 +197,8 @@ function resolveProvider(id) {
   if (!url) return { id, error: `environment variable ${p.urlEnv} is not set` };
   let host; try { host = new URL(url).host; } catch { return { id, error: `${p.urlEnv} is not a URL` }; }
   if (host !== p.host) return { id, error: `resolved host "${host}" is not the approved host "${p.host}" for provider "${id}"` };
+  const refused = refuseUrlShape(url);
+  if (refused) return { id, error: `${p.urlEnv} ${refused}` };
   // THE URL NEVER ENTERS THE PROVIDER OBJECT. It goes into a private map that nothing serializes, and
   // the object returned here, which IS written into evidence, carries only non-secret fields.
   //
@@ -205,7 +207,7 @@ function resolveProvider(id) {
   // Joshua's key into a tracked evidence file, which was committed to a PUBLIC repository. The key must
   // be rotated. Redacting at each write site would leave the next new write site to leak it again, so the
   // secret is kept out of the object entirely, and `writeEvidence` refuses to write anything containing
-  // a configured URL's path or query as a last line of defence.
+  // any secret form of a configured URL (see `secretFragments`) as a last line of defence.
   URLS.set(id, url);
   return { id, host, operator: p.operator, credentialed: p.credentialed, endpointConfigSha256: sha256(`${id}|${host}`) };
 }
@@ -214,25 +216,79 @@ function resolveProvider(id) {
 const URLS = new Map();
 const urlOf = (p) => URLS.get(p.id);
 
-/// The secret-bearing fragments of every configured URL: the whole URL, its path, its query, each also
-/// hex-encoded (a provider can return arbitrary bytes that decode to text). Hosts are not secret.
-function secretFragments() {
+// ---- what counts as secret in a configured URL ----
+//
+// The Codex diff review (round 5) showed the guard knew only COMPOUND forms: the whole URL, its path and
+// its query. A provider holds the credential already, so it can echo the token ON ITS OWN ("invalid key
+// Qx7...") or hex-encoded in a result, and neither contains "/v2/" or "?apikey=". So the redaction set is
+// built from ATOMS: every path segment, every query key and value, raw and percent-decoded, each also
+// percent-encoded, hex-encoded and base64-encoded, alongside the compound forms.
+//
+// An atom has to be long enough to redact without also redacting ordinary text, so a URL component is
+// either a known generic part of an endpoint (`v2`, `rpc`, `apikey`...) or at least MIN_ATOM characters.
+// A short non-generic component is REFUSED at configuration time rather than left unredacted: a short
+// credential is still a credential, and the probe will not run with one it cannot recognise. User:password
+// credentials and #fragments are refused outright; neither has any use for a JSON-RPC endpoint.
+const MIN_ATOM = 8;
+const GENERIC_COMPONENT = /^(v\d+|rpc|api|apikey|api_key|api-key|key|token|auth)$/i;
+
+function urlComponents(u) {
   const out = [];
-  for (const url of URLS.values()) {
-    const u = new URL(url);
-    for (const f of [url, u.pathname !== '/' ? u.pathname : null, u.search || null]) {
-      if (f && f.length >= 4) out.push(f, Buffer.from(f).toString('hex'));
+  for (const seg of u.pathname.split('/')) if (seg) out.push(seg, safeDecode(seg));
+  for (const part of u.search.replace(/^\?/, '').split('&')) {
+    if (!part) continue;
+    const eq = part.indexOf('=');
+    const k = eq < 0 ? part : part.slice(0, eq);
+    const v = eq < 0 ? '' : part.slice(eq + 1);
+    for (const c of [k, v]) if (c) out.push(c, safeDecode(c.replace(/\+/g, ' ')));
+  }
+  return [...new Set(out)];
+}
+function safeDecode(c) { try { return decodeURIComponent(c); } catch { return c; } }
+
+/// Returns why a URL's shape is refused, or null. The reason never quotes the URL or any part of it.
+function refuseUrlShape(url) {
+  const u = new URL(url);
+  if (u.username || u.password) return 'carries user:password credentials, which this probe refuses';
+  if (u.hash) return 'has a #fragment, which this probe refuses';
+  for (const c of urlComponents(u)) {
+    if (!GENERIC_COMPONENT.test(c) && c.length < MIN_ATOM) {
+      return `has a path segment or query component shorter than ${MIN_ATOM} characters that is not a known generic part; it could not be redacted reliably, so the probe refuses it`;
     }
   }
-  return out;
+  return null;
 }
 
-/// Redacts every configured URL fragment from a string. Used on ALL console output, so a provider string
-/// that slips through some future code path still cannot put a credential in a log. It is the stdout
-/// counterpart of `writeEvidence`'s refusal.
+/// Every secret-bearing form of every configured URL. Hosts are not secret.
+function secretFragments() {
+  const out = new Set();
+  const add = (f) => {
+    if (!f || f.length < MIN_ATOM) return;
+    for (const g of [f, encodeURIComponent(f)]) {
+      out.add(g);
+      out.add(Buffer.from(g).toString('hex'));
+      out.add(Buffer.from(g).toString('base64').replace(/=+$/, ''));
+      out.add(Buffer.from(g).toString('base64url'));
+    }
+  };
+  for (const url of URLS.values()) {
+    const u = new URL(url);
+    add(url);
+    if (u.pathname !== '/') add(u.pathname);
+    add(u.search);
+    for (const c of urlComponents(u)) if (!GENERIC_COMPONENT.test(c)) add(c);
+  }
+  return [...out];
+}
+
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/// Redacts every secret form from a string, case-insensitively (hex can come back in either case). Used
+/// on ALL console output, so a provider string that slips through some future code path still cannot put
+/// a credential in a log. It is the stdout counterpart of `writeEvidence`'s refusal.
 function scrub(text) {
   let t = String(text);
-  for (const f of secretFragments()) t = t.split(f).join('[redacted]');
+  for (const f of secretFragments()) t = t.replace(new RegExp(escapeRe(f), 'gi'), '[redacted]');
   return t;
 }
 {
@@ -245,9 +301,9 @@ function scrub(text) {
   process.on('unhandledRejection', (e) => { err(scrub(`unhandled: ${e?.message ?? e}`)); process.exit(1); });
 }
 
-/// The only function that writes evidence. Before writing, it checks the serialized text for every
-/// configured URL, and for each URL's path and query on their own, and refuses to write if any appears.
-/// A key hidden in a path segment or query parameter is caught even if the host was stripped elsewhere.
+/// The only function that writes evidence. Before writing, it checks the serialized text for every secret
+/// form of every configured URL (see `secretFragments`: compound forms AND each credential on its own,
+/// raw, percent-encoded, hex and base64) and refuses to write if any appears.
 function writeEvidence(dir, name, obj) {
   const text = JSON.stringify(obj, null, 2);
   const lower = text.toLowerCase();
@@ -280,23 +336,64 @@ async function identity(p, block) {
   ]);
   const notServed = [cid, code, fm, ac, tv, blk].some((r) => !r.served);
   if (notServed) return { served: false, reason: 'one or more identity reads were not served within the retry budget' };
-  const addrOf = (r) => '0x' + String(r.body.result).slice(-40);
-  const codeHex = code.body.result || '0x';
-  const tvBytes = Buffer.from(String(tv.body.result || '').replace(/^0x/, ''), 'hex');
-  const tvString = tvBytes.length > 64 ? tvBytes.subarray(64).toString('utf8').replace(/\0+$/, '') : '';
-  const b = blk.body.result;
+  // EVERY VALUE BELOW IS PROVIDER-CHOSEN, so none is recorded verbatim unless it equals its pin; any other
+  // value becomes `MISMATCH sha256:<hash>`. Before round 5 the addresses were the last 40 hex characters of
+  // whatever came back, so a result carrying a hex-encoded credential would have been TRUNCATED into
+  // evidence, and a truncated credential defeats any string guard. Comparing to the pin first, and
+  // hashing on mismatch, leaves nothing to truncate. The comparison (`ok`) uses the raw values.
+  const raw = {
+    chainId: toNumber(cid.body.result),
+    codeHex: typeof code.body.result === 'string' ? code.body.result : '',
+    feeManager: code32(fm.body.result),
+    accessController: code32(ac.body.result),
+    typeAndVersion: abiString(tv.body.result),
+    blockNumber: toNumber(blk.body.result?.number),
+    blockHash: blk.body.result?.hash,
+    blockTimestamp: toNumber(blk.body.result?.timestamp),
+  };
+  const codeSha256 = sha256(Buffer.from(/^0x([0-9a-fA-F]{2})*$/.test(raw.codeHex) ? raw.codeHex.slice(2) : '', 'hex'));
+  const ZERO = '0x0000000000000000000000000000000000000000';
+  const ok = {
+    chainId: raw.chainId === CHAIN_ID,
+    code: codeSha256 === VERIFIER_CODE_SHA256,
+    feeManager: raw.feeManager === ZERO,
+    accessController: raw.accessController === ZERO,
+    typeAndVersion: raw.typeAndVersion === VERIFIER_TYPE_AND_VERSION,
+    blockNumber: raw.blockNumber === block,
+    blockHash: raw.blockHash === DEFAULT_TARGET.blockHash,
+    blockTimestamp: raw.blockTimestamp === DEFAULT_TARGET.blockTimestamp,
+  };
   return {
     served: true,
-    chainId: Number(BigInt(cid.body.result)),
-    codeBytes: (codeHex.length - 2) / 2,
-    codeSha256: sha256(Buffer.from(codeHex.replace(/^0x/, ''), 'hex')),
-    feeManager: addrOf(fm),
-    accessController: addrOf(ac),
-    // Provider-controlled text, so it is kept verbatim ONLY when it is exactly the expected value;
-    // otherwise only its hash is kept, since an unexpected string could echo anything.
-    typeAndVersion: tvString === VERIFIER_TYPE_AND_VERSION ? tvString : `MISMATCH sha256:${sha256(tvString)}`,
-    block: { number: Number(BigInt(b.number)), hash: b.hash, timestamp: Number(BigInt(b.timestamp)) },
+    ok,
+    chainId: pinnedOrHash(raw.chainId, ok.chainId),
+    codeSha256, // a hash already
+    feeManager: pinnedOrHash(raw.feeManager, ok.feeManager),
+    accessController: pinnedOrHash(raw.accessController, ok.accessController),
+    typeAndVersion: pinnedOrHash(raw.typeAndVersion, ok.typeAndVersion),
+    block: {
+      number: pinnedOrHash(raw.blockNumber, ok.blockNumber),
+      hash: pinnedOrHash(raw.blockHash, ok.blockHash),
+      timestamp: pinnedOrHash(raw.blockTimestamp, ok.blockTimestamp),
+    },
   };
+}
+
+const pinnedOrHash = (v, matches) => (matches ? v : `MISMATCH sha256:${sha256(String(v))}`);
+/// A hex quantity as a safe integer, or null. Never throws, so provider text never reaches an error message.
+function toNumber(q) {
+  if (typeof q !== 'string' || !/^0x[0-9a-fA-F]{1,13}$/.test(q)) return null;
+  return Number(BigInt(q));
+}
+/// An address from a 32-byte ABI word, or null unless the word is exactly a left-padded address.
+function code32(w) {
+  return typeof w === 'string' && /^0x0{24}[0-9a-fA-F]{40}$/.test(w) ? ('0x' + w.slice(-40)).toLowerCase() : null;
+}
+/// The string an ABI `string` return carries, or null. Only compared, never recorded unless it matches.
+function abiString(w) {
+  if (typeof w !== 'string' || !/^0x([0-9a-fA-F]{2})*$/.test(w)) return null;
+  const b = Buffer.from(w.slice(2), 'hex');
+  return b.length > 64 ? b.subarray(64).toString('utf8').replace(/\0+$/, '') : null;
 }
 
 // ---- main ----
@@ -341,6 +438,7 @@ console.log(`\ntarget: ${DEFAULT_TARGET.label}`);
 console.log(`block ${DEFAULT_TARGET.block}, calldata ${(calldata.length - 2) / 2} bytes\n`);
 
 const results = {};
+const resultHashes = {};
 for (const p of [A, B]) {
   console.log(`--- ${p.id} (${p.host}) ---`);
   const ident = await identity(p, DEFAULT_TARGET.block);
@@ -349,17 +447,9 @@ for (const p of [A, B]) {
   // The runtime code is identified by its HASH, not merely its length: PROOF_STANDARD §9 requires
   // the contract whose answers are trusted to be identified by its code, and a length check alone
   // accepts any other contract of the same size.
-  const idOk =
-    ident.chainId === CHAIN_ID &&
-    ident.codeBytes === VERIFIER_CODE_BYTES &&
-    ident.codeSha256 === VERIFIER_CODE_SHA256 &&
-    ident.feeManager === '0x0000000000000000000000000000000000000000' &&
-    ident.accessController === '0x0000000000000000000000000000000000000000' &&
-    ident.typeAndVersion === VERIFIER_TYPE_AND_VERSION &&
-    ident.block.hash === DEFAULT_TARGET.blockHash &&
-    ident.block.timestamp === DEFAULT_TARGET.blockTimestamp;
+  const idOk = Object.values(ident.ok).every(Boolean);
 
-  console.log(`  chainId ${ident.chainId}   typeAndVersion "${ident.typeAndVersion}"   code ${ident.codeBytes} bytes`);
+  console.log(`  chainId ${ident.chainId}   typeAndVersion "${ident.typeAndVersion}"`);
   console.log(`  s_feeManager ${ident.feeManager}   s_accessController ${ident.accessController}`);
   console.log(`  block ${ident.block.number} ${ident.block.hash} ts ${ident.block.timestamp}`);
   console.log(`  code sha256 ${ident.codeSha256.slice(0, 16)}... ${ident.codeSha256 === VERIFIER_CODE_SHA256 ? 'matches the pin' : 'DOES NOT MATCH THE PIN'}`);
@@ -381,10 +471,15 @@ for (const p of [A, B]) {
   } else {
     console.log(`  verify: MALFORMED RETURN, ${dec.reason}`);
   }
+  // A malformed return is recorded by hash and reason code only. A well-formed one is recorded in full,
+  // since it IS the evidence, and `writeEvidence` still refuses it if it carries any secret form.
+  resultHashes[p.id] = sha256(String(call.body.result));
   results[p.id] = {
     provider: p, identity: ident, identityOk: idOk, status: 'SERVED',
     attempts: call.attempts, requestHash: call.requestHash, responseHash: call.responseHash,
-    rawResult: call.body.result, decoded: dec,
+    rawResultSha256: resultHashes[p.id],
+    ...(dec.ok ? { rawResult: call.body.result } : {}),
+    decoded: dec,
   };
   console.log('');
 }
@@ -394,7 +489,7 @@ const rA = results[A.id], rB = results[B.id];
 let status;
 if (rA.status === 'ARCHIVE_UNAVAILABLE' || rB.status === 'ARCHIVE_UNAVAILABLE') status = 'ARCHIVE_UNAVAILABLE';
 else if (rA.status === 'REVERTED' || rB.status === 'REVERTED') status = 'VERIFICATION_MISMATCH';
-else if (rA.rawResult !== rB.rawResult) status = 'VERIFICATION_MISMATCH';
+else if (resultHashes[A.id] !== resultHashes[B.id]) status = 'VERIFICATION_MISMATCH';
 else if (!rA.decoded?.ok || !rB.decoded?.ok) status = 'VERIFICATION_MISMATCH'; // a served but malformed return
 else if (!rA.identityOk || !rB.identityOk) status = 'VERIFICATION_MISMATCH';
 else status = 'VERIFIED_MATCH';
@@ -411,7 +506,7 @@ const out = {
   target: DEFAULT_TARGET,
   calldataSha256: sha256(calldata),
   providers: { [A.id]: rA, [B.id]: rB },
-  bytesIdentical: rA.rawResult !== undefined && rA.rawResult === rB.rawResult,
+  bytesIdentical: resultHashes[A.id] !== undefined && resultHashes[A.id] === resultHashes[B.id],
 };
 writeEvidence(OUT, 'RESULT.json', out);
 
