@@ -19,19 +19,22 @@
 // looks for any 10-character window of a credential too, since a truncated credential is still a leak.
 // The PARTIAL modes come from the adversary pass on that fix: the credential minus one character, hex in
 // a well-formed result, raw when the key is itself hex, and a digits-only key as the JSON-RPC error code.
+// The GROUND mode comes from the second adversary pass: a provider knows its own credential, so it can
+// search offline for a response whose sha256, which the evidence records, contains 10 of its characters.
 //
 // No network. The working tree is never modified.
 
 import { mkdtempSync, cpSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SENTINELS = ['SENTINELPATHKEYaaaa1111', 'SENTINELQUERYbbbb2222', 'SENTINELPATHKEYcccc3333', 'SENTINELQUERYdddd4444',
-  'SENTINELQUERY+pct5555', 'SENTINELUSERffff6666', 'SENTINELPASSgggg7777'];
+  'SENTINELQUERY+pct5555', 'SENTINELUSERffff6666', 'SENTINELPASSgggg7777', 'SENTINEL"QUOTEhhhh8888', '\u00e9SENTINELUTF8iiii9999'];
 
 // ---- a minimal JSON-RPC server answering the calls the probe makes ----
 // MODE makes the mock HOSTILE in the way the Codex diff review (round 4) described: a provider, gateway or
@@ -77,6 +80,7 @@ const server = createServer((req, res) => {
       const bytes = Buffer.from(pathAtom.replace(/%([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16))), 'latin1');
       return ok('0x' + bytes.toString('hex'));
     }
+    if (isVerify && MODE === 'ground-hash') return ok(GROUND_RESULT);
     if (isVerify && MODE === 'partial-shared') return ok(envelope(hexOf(SENTINELS[0].slice(0, -1))));
     if (MODE === 'atom-address' && method === 'eth_call' && data.startsWith('0x38416b5b')) {
       // s_feeManager(): a 32-byte word ending in the credential, which a last-40-hex slice truncates.
@@ -121,7 +125,14 @@ function tree({ reintroduceBug = false } = {}) {
     // Put the original defect back: serialize the full URL into the evidence object.
     const p = join(dir, 'script/probe-archive.mjs');
     const src = readFileSync(p, 'utf8');
-    const leak = reintroduceBug === 'partial' ? 'urlOf(A).slice(-15, -1)' : 'urlOf(A)';
+    const leak = {
+      partial: 'urlOf(A).slice(-15, -1)',
+      // 'x' + 10 credential bytes: base64 of that starts the credential one byte off a 3-byte boundary.
+      'base64-10': "Buffer.from('x' + urlOf(A).slice(-11, -1)).toString('base64')",
+      // 10 characters spanning the quote, so no quote-free 10-character run exists to match unescaped.
+      'decoded-query': "new URL(urlOf(A)).searchParams.get('apikey').slice(3, 13)",
+      'decoded-query-10': "new URL(urlOf(A)).searchParams.get('apikey').slice(0, 10)",
+    }[reintroduceBug] || 'urlOf(A)';
     const patched = src.replace('status,\n  proofLevel: level,', `status,\n  leakedUrl: ${leak},\n  proofLevel: level,`);
     if (patched === src) throw new Error('could not re-introduce the bug: anchor moved');
     writeFileSync(p, patched);
@@ -172,6 +183,14 @@ const urlB = `http://${HOST}/v2/${SENTINELS[2]}?apikey=${SENTINELS[3]}`;
 const both = { MAKO_RPC_MOCK_A: urlA, MAKO_RPC_MOCK_B: urlB };
 const HEXKEY = 'feedfacecafebabe0123456789abcdef'; // an Infura-style key made only of hex characters
 const NUMKEY = '314159265358979'; // a digits-only key
+// Found by the second adversary pass with an offline search: sha256("0x000000001c0a4437") contains
+// "6535897932", 10 consecutive digits of GROUND_DIGITS. Re-checked here so the fixture cannot silently rot.
+const GROUND_DIGITS = '3141592653589793238462643383279';
+const GROUND_RESULT = '0x000000001c0a4437';
+{
+  const h = createHash('sha256').update(GROUND_RESULT).digest('hex');
+  if (!h.includes('6535897932') || !GROUND_DIGITS.includes('6535897932')) throw new Error('GROUND fixture no longer grinds');
+}
 const clean = (r, extra) => leaks(r.resultText, extra).length === 0 && leaks(r.out, extra).length === 0;
 const written = (r, extra) => r.resultText !== null && clean(r, extra);
 const refusedAtConfig = (r, extra) => r.code === 2 && r.resultText !== null && clean(r, extra);
@@ -250,6 +269,40 @@ const scenarios = [
     mode: 'partial-shared',
     opts: {},
     env: both,
+    check: (r) => r.code === 5 && r.resultText === null && clean(r),
+  },
+  {
+    name: 'GROUND: credential v<digits> (not a version label) with a hash ground to 10 of its digits is refused (exit 5)',
+    mode: 'ground-hash',
+    opts: {},
+    env: { MAKO_RPC_MOCK_A: `http://${HOST}/v2/v${GROUND_DIGITS}`, MAKO_RPC_MOCK_B: urlB },
+    extra: [GROUND_DIGITS],
+    check: (r) => r.code === 5 && r.resultText === null && clean(r, [GROUND_DIGITS]),
+  },
+  {
+    name: 'GROUND control: the same attack on credential k<digits> is refused (exit 5)',
+    mode: 'ground-hash',
+    opts: {},
+    env: { MAKO_RPC_MOCK_A: `http://${HOST}/v2/k${GROUND_DIGITS}`, MAKO_RPC_MOCK_B: urlB },
+    extra: [GROUND_DIGITS],
+    check: (r) => r.code === 5 && r.resultText === null && clean(r, [GROUND_DIGITS]),
+  },
+  {
+    name: 'LAST-LINE GUARD: a bug writing 10 credential bytes base64-encoded off a 3-byte boundary is refused (exit 5)',
+    opts: { reintroduceBug: 'base64-10' },
+    env: both,
+    check: (r) => r.code === 5 && r.resultText === null && clean(r),
+  },
+  {
+    name: 'LAST-LINE GUARD: a bug writing 10 credential characters spanning a quote (JSON-escaped) is refused (exit 5)',
+    opts: { reintroduceBug: 'decoded-query' },
+    env: { MAKO_RPC_MOCK_A: `http://${HOST}/v2/${SENTINELS[0]}?apikey=${encodeURIComponent(SENTINELS[7])}`, MAKO_RPC_MOCK_B: urlB },
+    check: (r) => r.code === 5 && r.resultText === null && clean(r),
+  },
+  {
+    name: 'LAST-LINE GUARD: a bug writing 10 characters of a non-ASCII credential is refused (exit 5)',
+    opts: { reintroduceBug: 'decoded-query-10' },
+    env: { MAKO_RPC_MOCK_A: `http://${HOST}/v2/${SENTINELS[0]}?apikey=${encodeURIComponent(SENTINELS[8])}`, MAKO_RPC_MOCK_B: urlB },
     check: (r) => r.code === 5 && r.resultText === null && clean(r),
   },
   {

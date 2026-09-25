@@ -228,18 +228,21 @@ const urlOf = (p) => URLS.get(p.id);
 // hex-encoded in a result, matched nothing, and one missing character is trivial to brute-force.
 //
 // So the unit of secrecy is any WINDOW of WINDOW bytes of any credential atom, not the atom. An atom is
-// every path segment and every query key and value, both as written and percent-decoded BYTEWISE (so an
-// escape that is not valid UTF-8 still decodes). Each window is matched plain, hex and percent-encoded,
-// and every window of WINDOW - 1 bytes is matched base64 and base64url, which covers a base64 echo of
-// any 12 or more consecutive credential bytes whatever its alignment. Matching is case-insensitive.
+// every path segment and every query key and value, in each spelling: as written, and percent-decoded
+// BYTEWISE (so an escape that is not valid UTF-8 still decodes) with `+` kept and with `+` as a space.
+// Each window is matched as latin1 and UTF-8 text, hex and percent-encoded, and every 6-byte window as
+// base64 and base64url, which covers a base64 echo of any WINDOW consecutive credential bytes at any
+// alignment. Matching is case-insensitive, and the evidence guard also matches JSON-escaped forms.
 //
 // An atom shorter than MIN_ATOM bytes cannot be windowed without redacting ordinary text, so a URL
 // component is either a known generic part of an endpoint (`v2`, `rpc`, `apikey`...) or at least
-// MIN_ATOM bytes, in both spellings. A short non-generic component is REFUSED at configuration time: a
+// MIN_ATOM bytes, in every spelling. A short non-generic component is REFUSED at configuration time: a
 // short credential is still a credential. User:password credentials and #fragments are refused outright.
 const MIN_ATOM = 8;
 const WINDOW = 10;
-const GENERIC_COMPONENT = /^(v\d+|rpc|api|apikey|api_key|api-key|key|token|auth)$/i;
+// `v` + AT MOST three digits: an unbounded `v\d+` let a credential shaped `v31415926535...` count as a
+// version label, so it was neither refused nor redacted (second adversary pass on round 5).
+const GENERIC_COMPONENT = /^(v\d{1,3}|rpc|api|apikey|api_key|api-key|key|token|auth)$/i;
 
 /// Percent-decodes to BYTES, never failing: `%XX` becomes that byte, anything else its UTF-8 bytes.
 function pctBytes(c) {
@@ -260,9 +263,10 @@ function urlAtoms(u) {
     const eq = part.indexOf('=');
     for (const c of eq < 0 ? [part] : [part.slice(0, eq), part.slice(eq + 1)]) if (c) out.push(c);
   }
+  // `+` means a space in a query but a literal `+` in a path, so both decodings are kept as spellings.
   return out
-    .map((raw) => ({ raw, bytes: pctBytes(raw.replace(/\+/g, ' ')) }))
-    .filter((a) => !GENERIC_COMPONENT.test(a.raw) && !GENERIC_COMPONENT.test(a.bytes.toString('latin1')));
+    .map((raw) => ({ raw, spellings: [Buffer.from(raw), pctBytes(raw), pctBytes(raw.replace(/\+/g, ' '))] }))
+    .filter((a) => a.spellings.every((b) => !GENERIC_COMPONENT.test(b.toString('latin1'))));
 }
 
 /// Returns why a URL's shape is refused, or null. The reason never quotes the URL or any part of it.
@@ -271,7 +275,7 @@ function refuseUrlShape(url) {
   if (u.username || u.password) return 'carries user:password credentials, which this probe refuses';
   if (u.hash) return 'has a #fragment, which this probe refuses';
   for (const a of urlAtoms(u)) {
-    if (a.raw.length < MIN_ATOM || a.bytes.length < MIN_ATOM) {
+    if (a.spellings.some((b) => b.length < MIN_ATOM)) {
       return `has a path segment or query component shorter than ${MIN_ATOM} characters that is not a known generic part; it could not be redacted reliably, so the probe refuses it`;
     }
   }
@@ -293,14 +297,17 @@ function secretFragments() {
     const u = new URL(url);
     for (const whole of [url, u.pathname !== '/' ? u.pathname : '', u.search]) if (whole.length >= MIN_ATOM) out.add(whole);
     for (const a of urlAtoms(u)) {
-      for (const b of [Buffer.from(a.raw), a.bytes]) {
+      for (const b of a.spellings) {
         for (const w of windows(b, WINDOW)) {
           out.add(w.toString('latin1'));
+          out.add(w.toString('utf8')); // a non-ASCII credential echoed as text
           out.add(w.toString('hex'));
           out.add(encodeURIComponent(w.toString('utf8')));
         }
-        for (const w of windows(b, WINDOW - 1)) {
-          out.add(w.toString('base64').replace(/=+$/, ''));
+        // Base64 in whole 3-byte groups, so each fragment's characters do not depend on the next byte. Any
+        // echo of WINDOW consecutive credential bytes contains a 6-byte run on a 3-byte boundary.
+        for (const w of windows(b, 6)) {
+          out.add(w.toString('base64'));
           out.add(w.toString('base64url'));
         }
       }
@@ -336,8 +343,10 @@ function scrub(text) {
 function writeEvidence(dir, name, obj) {
   const text = JSON.stringify(obj, null, 2);
   const lower = text.toLowerCase();
-  for (const frag of secretFragments()) {
-    if (text.includes(frag) || lower.includes(frag.toLowerCase())) {
+  for (const f of secretFragments()) {
+    // A fragment with a quote, backslash or control byte appears JSON-escaped in the serialized text.
+    const frag = JSON.stringify(f).slice(1, -1);
+    if (text.includes(f) || lower.includes(f.toLowerCase()) || lower.includes(frag.toLowerCase())) {
       console.error(`REFUSING TO WRITE EVIDENCE: it would contain part of a configured RPC URL. Nothing was written.`);
       process.exit(5);
     }

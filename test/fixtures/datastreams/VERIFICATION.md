@@ -71,14 +71,19 @@ adversary pass on the first fix then found it incomplete too:** matching a whole
 credential minus ONE character, hex-encoded in a well-formed result, and a digits-only key minus one digit
 returned as the JSON-RPC error code reached both stdout and evidence. Now:
 - **The unit of secrecy is any 10-byte window of any credential**, not the credential. A credential atom is
-  every path segment and query key or value, as written and percent-decoded bytewise (an escape that is
-  not valid UTF-8 still decodes). Each window is matched plain, hex and percent-encoded, and every 9-byte
-  window is matched base64 and base64url, so a base64 echo of any 12 or more consecutive credential bytes
-  is caught at any alignment. Case-insensitive, for the evidence guard and for every console write.
+  every path segment and query key or value, in each spelling: as written, and percent-decoded bytewise
+  (an escape that is not valid UTF-8 still decodes) with `+` kept and with `+` as a space. Each window is
+  matched as latin1 and UTF-8 text, hex and percent-encoded, and every 6-byte window as base64 and
+  base64url, so a base64 echo of any 10 consecutive credential bytes is caught at any alignment. Matching
+  is case-insensitive for the evidence guard and every console write, and the guard also matches
+  JSON-escaped forms.
 - **A URL the probe cannot fully redact is refused before any call.** URLs with user:password
   credentials or a #fragment are refused, and so is any path segment or query component shorter than
-  8 characters, as written or decoded, that is not a known generic part (`v2`, `rpc`, `apikey`...). A
-  short credential is still a credential. None of these refusal messages quotes the URL.
+  8 characters, in any spelling, that is not a known generic part (`v2`, `rpc`, `apikey`...). A short
+  credential is still a credential. A version label is `v` plus at most three digits: the second
+  adversary pass showed an unbounded `v\d+` letting a credential shaped `v31415926535...` count as a
+  label, so it was neither refused nor redacted, and a provider could search offline for a response
+  whose recorded sha256 contained 10 of its digits. None of these refusal messages quotes the URL.
 - **Evidence keeps a provider value only if it equals its pin, or both operators returned it.** Chain id,
   the fee manager and access controller addresses, `typeAndVersion`, and the block number, hash and
   timestamp are each recorded verbatim only when they match the pinned value, and otherwise as
@@ -90,19 +95,24 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
   return counts as well-formed only if it is exactly 352 bytes, offset 32, length 288.
 - **Only a standard JSON-RPC error code is kept** (3, or -32768 to -32000). Any other integer is
   provider-chosen data.
-- `test-probe-redaction.mjs` has 25 scenarios:
+- `test-probe-redaction.mjs` has 30 scenarios:
   - each credential alone in error text and in base64;
   - hex as a malformed result and as a well-formed unshared result;
   - truncated into an address word, as the block hash, and echoed percent-decoded;
   - the adversary's four partial cases;
   - a non-UTF-8 escape echoed as decoded bytes;
   - four refused URL shapes;
-  - three guard cases, each expected to exit 5: the original bug put back, a bug writing the credential
-    minus one character, and a shared well-formed return carrying part of a credential.
+  - the second adversary's hash-grinding case against a `v<digits>` credential, and its `k<digits>`
+    control, both expected to exit 5;
+  - six guard cases, each expected to exit 5: the original bug put back, a bug writing the credential
+    minus one character, a shared well-formed return carrying part of a credential, and bugs writing 10
+    credential bytes base64-encoded off a 3-byte boundary, 10 characters spanning a JSON-escaped quote,
+    and 10 characters of a non-ASCII credential.
 
   A leak means any 10-character window of a credential, plain or hex. **Against `8f4e3b0` (the first
-  round-5 fix) 7 of the 25 fail, and against `a86525d` more do.** The adversary's own test passes 5 of 5
-  against this version. The non-UTF-8 case is a regression case only: the windows of the escaped
+  round-5 fix) 7 of the 25 then present failed, and against `153fa0c` exactly the four cases added for
+  the second pass fail while their control passes.** Both adversaries' own tests pass against this
+  version. The `+`-in-a-path spelling is covered by construction, not by a separate case. The non-UTF-8 case is a regression case only: the windows of the escaped
   spelling already cover its ASCII part, so it does not isolate the bytewise decoder.
 - **Out of scope, stated so nobody relies on it:** a provider that deliberately transforms the key it
   holds beyond these encodings, for example by interleaving its bytes, cannot be caught by any string
