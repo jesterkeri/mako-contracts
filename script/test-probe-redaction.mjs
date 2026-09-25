@@ -34,7 +34,8 @@ import { fileURLToPath } from 'node:url';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SENTINELS = ['SENTINELPATHKEYaaaa1111', 'SENTINELQUERYbbbb2222', 'SENTINELPATHKEYcccc3333', 'SENTINELQUERYdddd4444',
-  'SENTINELQUERY+pct5555', 'SENTINELUSERffff6666', 'SENTINELPASSgggg7777', 'SENTINEL"QUOTEhhhh8888', '\u00e9SENTINELUTF8iiii9999'];
+  'SENTINELQUERY+pct5555', 'SENTINELUSERffff6666', 'SENTINELPASSgggg7777', 'SENTINEL"QUOTEhhhh8888', '\u00e9SENTINELUTF8iiii9999',
+  'SENTINELCJK\u9375\u79d8\u5bc6\u9375\u79d8\u5bc6\u9375\u79d8\u5bc6\u9375', 'sentinelidkkkk1111'];
 
 // ---- a minimal JSON-RPC server answering the calls the probe makes ----
 // MODE makes the mock HOSTILE in the way the Codex diff review (round 4) described: a provider, gateway or
@@ -81,6 +82,12 @@ const server = createServer((req, res) => {
       return ok('0x' + bytes.toString('hex'));
     }
     if (isVerify && MODE === 'ground-hash') return ok(GROUND_RESULT);
+    // Third adversary pass: inputs that crashed the run (exit 1, no evidence) rather than leaked.
+    if (MODE === 'huge-code' && method === 'eth_getCode') return ok('0x' + 'ab'.repeat(6_000_000));
+    if (MODE === 'object-hash' && method === 'eth_getBlockByNumber') {
+      return ok({ number: '0x3c01d5b', hash: { toString: 1, note: req.url }, timestamp: '0x6aaa0c48' });
+    }
+    if (isVerify && MODE === 'object-message') return fail(-32000, { toString: 1, url: req.url });
     if (isVerify && MODE === 'partial-shared') return ok(envelope(hexOf(SENTINELS[0].slice(0, -1))));
     if (MODE === 'atom-address' && method === 'eth_call' && data.startsWith('0x38416b5b')) {
       // s_feeManager(): a 32-byte word ending in the credential, which a last-40-hex slice truncates.
@@ -132,6 +139,7 @@ function tree({ reintroduceBug = false } = {}) {
       // 10 characters spanning the quote, so no quote-free 10-character run exists to match unescaped.
       'decoded-query': "new URL(urlOf(A)).searchParams.get('apikey').slice(3, 13)",
       'decoded-query-10': "new URL(urlOf(A)).searchParams.get('apikey').slice(0, 10)",
+      'decoded-query-last-10': "Array.from(new URL(urlOf(A)).searchParams.get('apikey')).slice(-10).join('')",
     }[reintroduceBug] || 'urlOf(A)';
     const patched = src.replace('status,\n  proofLevel: level,', `status,\n  leakedUrl: ${leak},\n  proofLevel: level,`);
     if (patched === src) throw new Error('could not re-introduce the bug: anchor moved');
@@ -305,6 +313,28 @@ const scenarios = [
     env: { MAKO_RPC_MOCK_A: `http://${HOST}/v2/${SENTINELS[0]}?apikey=${encodeURIComponent(SENTINELS[8])}`, MAKO_RPC_MOCK_B: urlB },
     check: (r) => r.code === 5 && r.resultText === null && clean(r),
   },
+  {
+    name: 'LAST-LINE GUARD: a bug writing 10 CJK characters of a credential is refused (exit 5)',
+    opts: { reintroduceBug: 'decoded-query-last-10' },
+    env: { MAKO_RPC_MOCK_A: `http://${HOST}/v2/${SENTINELS[0]}?apikey=${encodeURIComponent(SENTINELS[9])}`, MAKO_RPC_MOCK_B: urlB },
+    check: (r) => r.code === 5 && r.resultText === null && clean(r),
+  },
+  // ---- third adversary pass ----
+  {
+    name: 'PROVIDER ID: a URL pasted into MAKO_PROVIDER_A is neither printed nor recorded',
+    opts: {},
+    env: { ...both, MAKO_PROVIDER_A: urlA },
+    check: (r) => refusedAtConfig(r),
+  },
+  {
+    name: 'PROVIDER ID: an unknown id shaped like a key is neither printed nor recorded',
+    opts: {},
+    env: { ...both, MAKO_PROVIDER_A: SENTINELS[10] },
+    check: (r) => refusedAtConfig(r),
+  },
+  { name: 'ROBUST: a 12 MB eth_getCode result is classified, not a crash', mode: 'huge-code', opts: {}, env: both, check: (r) => r.code === 3 && written(r) },
+  { name: 'ROBUST: a block hash that is an object with a non-callable toString', mode: 'object-hash', opts: {}, env: both, check: (r) => r.code === 3 && written(r) },
+  { name: 'ROBUST: an error message that is an object carrying the URL', mode: 'object-message', opts: {}, env: both, check: (r) => r.code === 3 && written(r) },
   {
     name: 'LAST-LINE GUARD: a bug writing the query credential minus one char is refused (exit 5)',
     opts: { reintroduceBug: 'partial' },

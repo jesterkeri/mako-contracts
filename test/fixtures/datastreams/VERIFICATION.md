@@ -73,7 +73,8 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
 - **The unit of secrecy is any 10-byte window of any credential**, not the credential. A credential atom is
   every path segment and query key or value, in each spelling: as written, and percent-decoded bytewise
   (an escape that is not valid UTF-8 still decodes) with `+` kept and with `+` as a space. Each window is
-  matched as latin1 and UTF-8 text, hex and percent-encoded, and every 6-byte window as base64 and
+  matched as latin1 and UTF-8 text, hex and percent-encoded, every 10 consecutive characters of a valid
+  UTF-8 spelling are matched (a credential of multi-byte characters), and every 6-byte window as base64 and
   base64url, so a base64 echo of any 10 consecutive credential bytes is caught at any alignment. Matching
   is case-insensitive for the evidence guard and every console write, and the guard also matches
   JSON-escaped forms.
@@ -95,7 +96,13 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
   return counts as well-formed only if it is exactly 352 bytes, offset 32, length 288.
 - **Only a standard JSON-RPC error code is kept** (3, or -32768 to -32000). Any other integer is
   provider-chosen data.
-- `test-probe-redaction.mjs` has 30 scenarios:
+- **The provider id is never quoted back.** An id from `MAKO_PROVIDER_A`/`B` is recorded only if
+  `providers.json` lists it; an unknown one, which could be a URL pasted into the wrong variable, is
+  reported as unknown without being printed or recorded (third adversary pass).
+- **A hostile provider cannot crash the run instead of being classified.** Hex is checked without a
+  repeated capture group, which overflowed the regex stack on a multi-megabyte value, and provider values
+  are turned into text for hashing with `JSON.stringify`, never through a provider-chosen `toString`.
+- `test-probe-redaction.mjs` has 36 scenarios:
   - each credential alone in error text and in base64;
   - hex as a malformed result and as a well-formed unshared result;
   - truncated into an address word, as the block hash, and echoed percent-decoded;
@@ -107,12 +114,15 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
   - six guard cases, each expected to exit 5: the original bug put back, a bug writing the credential
     minus one character, a shared well-formed return carrying part of a credential, and bugs writing 10
     credential bytes base64-encoded off a 3-byte boundary, 10 characters spanning a JSON-escaped quote,
-    and 10 characters of a non-ASCII credential.
+    10 characters of a non-ASCII credential, and 10 CJK characters of a credential;
+  - from the third adversary pass: a URL, and a key-shaped string, pasted as the provider id, and three
+    inputs that used to crash the run (a 12 MB `eth_getCode` result, a block hash and an error message
+    that are objects with a non-callable `toString`).
 
   A leak means any 10-character window of a credential, plain or hex. **Against `8f4e3b0` (the first
   round-5 fix) 7 of the 25 then present failed, and against `153fa0c` exactly the four cases added for
-  the second pass fail while their control passes.** Both adversaries' own tests pass against this
-  version. The `+`-in-a-path spelling is covered by construction, not by a separate case. The non-UTF-8 case is a regression case only: the windows of the escaped
+  the second pass fail while their control passes, and against `f424a9c` exactly the six cases added
+  for the third pass fail.** The adversaries' own tests pass against this version. The `+`-in-a-path spelling is covered by construction, not by a separate case. The non-UTF-8 case is a regression case only: the windows of the escaped
   spelling already cover its ASCII part, so it does not isolate the bytewise decoder.
 - **Out of scope, stated so nobody relies on it:** a provider that deliberately transforms the key it
   holds beyond these encodings, for example by interleaving its bytes, cannot be caught by any string

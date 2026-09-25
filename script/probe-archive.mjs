@@ -78,6 +78,14 @@ const RETRY_BASE_MS = 500;
 const RETRY_CAP_MS = 8000;
 
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
+// Even-length 0x-hex, checked without a repeated capture group: `/^0x([0-9a-fA-F]{2})*$/` overflowed the
+// regex stack on a multi-megabyte provider value and crashed the run with no evidence (third adversary pass).
+const isHex = (s) => typeof s === 'string' && s.length % 2 === 0 && /^0x[0-9a-fA-F]*$/.test(s);
+/// A provider JSON value as text for HASHING only. Never coerces through a provider-chosen `toString`.
+function textOf(v) {
+  if (typeof v === 'string') return v;
+  try { return JSON.stringify(v) ?? 'undefined'; } catch { return 'unserializable'; }
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const hex = (n) => '0x' + n.toString(16);
 
@@ -133,7 +141,7 @@ async function rpcWithRetry(url, method, params) {
 // and NEVER returned, stored or logged: only a locally derived category and the numeric code survive.
 function categorize(err, httpStatus) {
   if (!err) return httpStatus === 200 ? 'ok' : `http-${Number(httpStatus) || 0}`;
-  const m = String(err.message || '').toLowerCase();
+  const m = msgOf(err);
   if (m.includes('missing trie node') || m.includes('pruned') || m.includes('not found')) return 'not-served';
   if (m.includes('rate limit') || m.includes('capacity') || httpStatus === 429) return 'rate-limited';
   if (m.includes('exceeds provider limit')) return 'provider-gas-limit';
@@ -143,12 +151,15 @@ function categorize(err, httpStatus) {
 // Only a STANDARD JSON-RPC code is kept: 3 (execution reverted) and the reserved -32768..-32000 range. Any
 // other integer is provider-chosen data, and the adversary pass showed a digits-only credential minus one
 // digit returned as `code` reaching both stdout and evidence.
+// A message that is not a string is ignored rather than coerced: `String()` on a provider object can run
+// or fail on provider-chosen `toString`, and either way the text would be provider data.
+const msgOf = (err) => (typeof err?.message === 'string' ? err.message.toLowerCase() : '');
 const rpcCodeOf = (err) => (err && Number.isInteger(err.code) && (err.code === 3 || (err.code >= -32768 && err.code <= -32000)) ? err.code : null);
 
 // A revert carries execution data; "missing trie node", a gas-limit refusal or a 429 do not.
 function isRevert(err) {
   if (!err) return false;
-  const m = (err.message || '').toLowerCase();
+  const m = msgOf(err);
   if (m.includes('missing trie node') || m.includes('not found') || m.includes('pruned')) return false;
   if (m.includes('exceeds provider limit') || m.includes('capacity') || m.includes('rate limit')) return false;
   return err.code === 3 || m.includes('execution reverted') || m.includes('revert');
@@ -161,7 +172,7 @@ function isRevert(err) {
 // alone: no lengths and no bytes, since every one of those is provider-chosen (round 5 of the Codex diff
 // review showed a malformed result carrying a hex-encoded credential into evidence).
 function decodeVerifyReturn(resultHex) {
-  if (typeof resultHex !== 'string' || !/^0x([0-9a-fA-F]{2})*$/.test(resultHex)) return { ok: false, reason: 'not-hex' };
+  if (!isHex(resultHex)) return { ok: false, reason: 'not-hex' };
   const b = Buffer.from(resultHex.slice(2), 'hex');
   if (b.length !== 352) return { ok: false, reason: 'not-352-bytes' };
   const offset = Number(BigInt('0x' + b.subarray(0, 32).toString('hex')));
@@ -193,9 +204,12 @@ function decodeVerifyReturn(resultHex) {
 
 // ---- providers ----
 const record = JSON.parse(readFileSync(join(HERE, 'providers.json'), 'utf8'));
+// A provider id comes from MAKO_PROVIDER_A/B, and a URL pasted there by mistake would be printed and
+// recorded as the id. So an id is recorded only if providers.json lists it, and an unknown one is never
+// quoted back (third adversary pass).
 function resolveProvider(id) {
   const p = record.providers.find((x) => x.id === id);
-  if (!p) return { id, error: `no provider with id "${id}" in providers.json` };
+  if (!p) return { id: 'unknown', error: 'the selected provider id is not listed in providers.json (it is not quoted here, in case it was a URL)' };
   const url = process.env[p.urlEnv];
   if (!url) return { id, error: `environment variable ${p.urlEnv} is not set` };
   let host; try { host = new URL(url).host; } catch { return { id, error: `${p.urlEnv} is not a URL` }; }
@@ -298,6 +312,11 @@ function secretFragments() {
     for (const whole of [url, u.pathname !== '/' ? u.pathname : '', u.search]) if (whole.length >= MIN_ATOM) out.add(whole);
     for (const a of urlAtoms(u)) {
       for (const b of a.spellings) {
+        // A credential made of multi-byte characters: every WINDOW consecutive CHARACTERS, when it is valid UTF-8.
+        const chars = Array.from(b.toString('utf8'));
+        if (!chars.includes('\uFFFD')) {
+          for (let i = 0; i + WINDOW <= chars.length; i++) out.add(chars.slice(i, i + WINDOW).join(''));
+        }
         for (const w of windows(b, WINDOW)) {
           out.add(w.toString('latin1'));
           out.add(w.toString('utf8')); // a non-ASCII credential echoed as text
@@ -389,7 +408,7 @@ async function identity(p, block) {
     blockHash: blk.body.result?.hash,
     blockTimestamp: toNumber(blk.body.result?.timestamp),
   };
-  const codeSha256 = sha256(Buffer.from(/^0x([0-9a-fA-F]{2})*$/.test(raw.codeHex) ? raw.codeHex.slice(2) : '', 'hex'));
+  const codeSha256 = sha256(Buffer.from(isHex(raw.codeHex) ? raw.codeHex.slice(2) : '', 'hex'));
   const ZERO = '0x0000000000000000000000000000000000000000';
   const ok = {
     chainId: raw.chainId === CHAIN_ID,
@@ -417,7 +436,7 @@ async function identity(p, block) {
   };
 }
 
-const pinnedOrHash = (v, matches) => (matches ? v : `MISMATCH sha256:${sha256(String(v))}`);
+const pinnedOrHash = (v, matches) => (matches ? v : `MISMATCH sha256:${sha256(textOf(v))}`);
 /// A hex quantity as a safe integer, or null. Never throws, so provider text never reaches an error message.
 function toNumber(q) {
   if (typeof q !== 'string' || !/^0x[0-9a-fA-F]{1,13}$/.test(q)) return null;
@@ -429,7 +448,7 @@ function code32(w) {
 }
 /// The string an ABI `string` return carries, or null. Only compared, never recorded unless it matches.
 function abiString(w) {
-  if (typeof w !== 'string' || !/^0x([0-9a-fA-F]{2})*$/.test(w)) return null;
+  if (!isHex(w)) return null;
   const b = Buffer.from(w.slice(2), 'hex');
   return b.length > 64 ? b.subarray(64).toString('utf8').replace(/\0+$/, '') : null;
 }
@@ -515,7 +534,7 @@ for (const p of [A, B]) {
   // operator knows the other's credential, so a shared answer cannot carry either one. Until then a
   // provider's return is recorded as a hash and a reason code. The adversary pass on round 5 showed a
   // well-formed return carrying the key minus one character, which no string guard matches reliably.
-  resultHashes[p.id] = sha256(String(call.body.result));
+  resultHashes[p.id] = sha256(textOf(call.body.result));
   held[p.id] = { rawResult: call.body.result, decoded: dec };
   results[p.id] = {
     provider: p, identity: ident, identityOk: idOk, status: 'SERVED',
