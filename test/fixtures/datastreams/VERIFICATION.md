@@ -28,9 +28,14 @@ URL, in `evidence/archive-probe-2026-09-23T15-40-59-836Z/RESULT.json`, and that 
 had been public for about a day.
 
 Response:
-- **Rotation of the key in the Alchemy dashboard (the "mako markets" app) is REQUIRED and, as of this
-  commit, NOT YET CONFIRMED.** Until it is, the copy that remains in git history must be treated as live.
-  History was not rewritten; rotation, not a rewrite, is what makes the leaked copy worthless.
+- **The key is revoked, confirmed 2026-09-25.** A replacement app ("mako market 2") was created and the
+  "mako markets" app (id `gttmq5fer38ms5p2`) was deleted with the Alchemy CLI. The leaked key, read from
+  commit `ca7066c` inside the command and never printed, then got **HTTP 403, JSON-RPC error -32600**
+  from `monad-testnet.g.alchemy.com`. The app's 7-day request log held exactly 7 requests, all on
+  2026-09-23 at 15:41 UTC: the single probe run that wrote the leaked file. So there was no use by anyone
+  else. No local file, shell history or readable Vercel variable held the key (checked by
+  `mako-design/scripts/rotate-alchemy-key.sh`, which prints names only). History was not rewritten: the
+  copy in `ca7066c` is still readable but worthless.
 - The committed file is redacted in place; every other copy was located by path and removed.
 - **The probe can no longer write a URL.** URLs live in a module-private map that nothing serializes;
   the provider object written into evidence holds only id, host, operator and a non-secret config hash.
