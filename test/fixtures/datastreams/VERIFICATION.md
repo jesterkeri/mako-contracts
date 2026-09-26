@@ -129,7 +129,9 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
   on Node 22.23.2: 145 bundled; `NODE_EXTRA_CA_CERTS` gives 146, `NODE_USE_SYSTEM_CA` 509, and
   `--use-openssl-ca` 0 (not enumerable, still unequal). The check runs when each provider is resolved
   AND before every https request: the eighth adversary pass had a preload change the store one second
-  after the startup check, and the impostor then answered. Stated limit: code the operator chooses to run
+  after the startup check, and the impostor then answered. Whether a request is https is decided from the
+  PARSED URL, as `fetch` decides it: the ninth pass showed `HTTPS://`, a leading space and a tab inside the
+  scheme skipping a raw `startsWith('https:')` test, so the per-request check never ran. Stated limit: code the operator chooses to run
   inside the process (a `--require`/`--import` preload) can replace `fetch`, change the store between a
   check and the connection it guards, or write any evidence it likes; no in-process check bounds that.
   The checks close every configuration route to widened trust and any in-process change made before a
@@ -196,7 +198,11 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
   start (preconditions: equal to bundled at load time, impostor trusted later); and a SWAP preload giving a
   store of the bundled size with one certificate replaced (precondition: same count, different members).
   Against `7f679ce` exactly the two delayed cases fail; with the check weakened to compare counts only,
-  exactly the swap case fails. The adversaries' own tests pass against this version. The `+`-in-a-path spelling is covered by construction, not by a separate case. The non-UTF-8 case is a regression case only: the windows of the escaped
+  exactly the swap case fails. Its delayed cases also require `trust-store-changed` in the evidence: without
+  that, losing the category (the ninth pass's mutant) still passed. Against that mutant both now fail.
+- `script/test-probe-tls-deferred-spelling.mjs` (in CI), from the ninth adversary pass: the delayed preload
+  against `HTTPS://`, ` https://` and `ht<TAB>tps://`, with a lower-case harness control, each requiring
+  `trust-store-changed` in the evidence. Against `eb6d630` exactly the three spellings fail. The adversaries' own tests pass against this version. The `+`-in-a-path spelling is covered by construction, not by a separate case. The non-UTF-8 case is a regression case only: the windows of the escaped
   spelling already cover its ASCII part, so it does not isolate the bytewise decoder.
 - **Out of scope, stated so nobody relies on it:** a provider that deliberately transforms the key it
   holds beyond these encodings, for example by interleaving its bytes, cannot be caught by any string

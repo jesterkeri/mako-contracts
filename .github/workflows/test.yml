@@ -56,6 +56,9 @@ jobs:
       - name: Archive probe re-checks trust before every request (delayed and same-size trust-store changes)
         run: node script/test-probe-tls-deferred.mjs
 
+      - name: Archive probe re-checks trust for every spelling of an https URL
+        run: node script/test-probe-tls-deferred-spelling.mjs
+
       - name: Run Forge fmt
         run: forge fmt --check
 

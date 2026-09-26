@@ -1,25 +1,20 @@
-// Operator-authentication test for the archive probe: a trust-store change made AFTER tlsWeakening() ran.
-// Written by the eighth adversary pass against 7f679ce and adopted into CI once the probe re-checked trust
-// before every request. The SWAP case was added then: a store with the bundled COUNT but one certificate
-// replaced by the test CA, so a check weakened to compare counts only would fail this test.
+// Operator-authentication test for the archive probe: the per-request trust check (eb6d630) against URL
+// SPELLINGS of https. Written by the ninth adversary pass against eb6d630, adopted into CI once rpc() took
+// the scheme from the parsed URL.
 //
-//   node script/test-probe-tls-deferred.mjs   needs `openssl` on PATH; about 20 seconds
+//   node script/test-probe-tls-deferred-spelling.mjs   needs `openssl` on PATH; about 40 seconds
 //
-// Same harness as test-probe-tls-bypass.mjs: the REAL probe runs from a temp copy of the repo against a local
-// CONNECT proxy that sends every tunnel to a local TLS server whose certificate only a throwaway test CA
-// vouches for. Sentinel credentials, hosts under .invalid, no network, the working tree is not modified.
+// Same harness as test-probe-tls-deferred.mjs, unchanged except for the URL spelling in each scenario.
 //
-// tlsWeakening() compares tls.getCACertificates('default') with 'bundled' ONCE, synchronously, when each
-// provider is resolved at module top level. Node reads the default trust store again for every new TLS
-// connection, and the probe retries transport errors (0, 0.5, 1.5, 3.5, 7.5 s). A preload whose only effect
-// is tls.setDefaultCACertificates() (the case the probe documents as caught "because it changes the trust
-// store"), run one second later instead of at load time, is invisible to the check and trusted by every
-// later connection. The spec's preload exclusion does not cover it: "except where it merely changes the
-// trust store".
+// resolveProvider() decides "https" from the PARSED URL (`new URL(url).protocol`), so `HTTPS://...`,
+// ` https://...` (leading space) and `ht<TAB>tps://...` are all accepted as https providers. rpc() decides
+// whether to re-check trust with `url.startsWith('https:')` on the RAW string, which is false for all three,
+// so the check the probe documents as running "before every https request" never runs for them, and fetch()
+// parses the same string as https. The delayed preload of test-probe-tls-deferred.mjs is the instrument, as
+// in that test; the lower-case scenario runs the SAME instrument to prove the harness catches it there.
 //
-// PASS means the impostor answered nothing and the run is not VERIFIED_MATCH, as in the bypass test. The
-// PRECONDITION line proves, outside the probe, both that the store equals the bundled set when checked at
-// load time and that the same preload makes Node trust the test CA one second later.
+// PASS means the impostor answered nothing and the run is not VERIFIED_MATCH. The PRECONDITION line proves
+// that the preload leaves the store equal to bundled at load time and makes Node trust the test CA later.
 
 import { mkdtempSync, cpSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { spawn, execFileSync } from 'node:child_process';
@@ -169,12 +164,24 @@ const remote = {
 };
 const green = (r) => r.code === 0 && r.result?.status === 'VERIFIED_MATCH';
 
+// Each spelling is one that `new URL()` parses as https with the approved host, checked below before any run.
+const spell = (prefix) => ({
+  MAKO_RPC_REMOTE_A: `${prefix}rpc-a.example.invalid/v2/${SENTINEL_A}`,
+  MAKO_RPC_REMOTE_B: `${prefix}rpc-b.example.invalid/v2/${SENTINEL_B}`,
+});
+const late = { NODE_OPTIONS: `--require=${c('late.cjs')}` };
 const scenarios = [
   { name: 'CONTROL: intercepting proxy, normal TLS settings: tunnels opened, impostor answers nothing', control: true, args: [], env: {} },
-  { name: `NODE_OPTIONS=--require=<preload calling tls.setDefaultCACertificates after ${DELAY_MS} ms>`, args: [], env: { NODE_OPTIONS: `--require=${c('late.cjs')}` } },
-  { name: `node --import=<preload calling tls.setDefaultCACertificates after ${DELAY_MS} ms>`, args: [`--import=${c('late.mjs')}`], env: {} },
-  { name: 'SWAP: a store of the bundled SIZE with one certificate replaced by the test CA', swap: true, args: [], env: { NODE_OPTIONS: `--require=${c('swap.cjs')}` } },
+  { name: `HARNESS CONTROL: lower-case https://, preload widening trust after ${DELAY_MS} ms`, args: [], env: { ...late, ...spell('https://') } },
+  { name: `upper-case HTTPS://, same preload`, prefix: 'HTTPS://', args: [], env: { ...late, ...spell('HTTPS://') } },
+  { name: `leading space " https://", same preload`, prefix: ' https://', args: [], env: { ...late, ...spell(' https://') } },
+  { name: `tab inside the scheme "ht<TAB>tps://", same preload`, prefix: 'ht\ttps://', args: [], env: { ...late, ...spell('ht\ttps://') } },
 ];
+for (const sc of scenarios) {
+  if (!sc.prefix) continue;
+  const u = new URL(`${sc.prefix}rpc-a.example.invalid/v2/x`);
+  if (u.protocol !== 'https:' || u.host !== 'rpc-a.example.invalid') throw new Error(`harness: ${JSON.stringify(sc.prefix)} does not parse as https`);
+}
 
 let bad = 0;
 for (const sc of scenarios) {
@@ -182,17 +189,14 @@ for (const sc of scenarios) {
   tunnels.length = 0;
   impostorAnswers = 0;
   const r = await runProbe(sc.args, { ...remote, ...sc.env });
+  // The trust change must be RECORDED as such, not only survived: an attempt with category trust-store-changed.
+  const recorded = JSON.stringify(r.result ?? {}).includes('"trust-store-changed"');
   const ok = sc.control
     ? tunnels.length > 0 && impostorAnswers === 0 && !green(r) && !r.leaked
-    : sc.swap
-      ? pre.countEqual && !pre.loadTimeEqual && pre.trustedLater && impostorAnswers === 0 && !green(r) && !r.leaked
-      // ...and the per-request check is what stopped it: its category is in the evidence. Without this the
-      // test also passed when the category was lost, or if a slow start let the startup check refuse first.
-      : pre.loadTimeEqual && pre.trustedLater && impostorAnswers === 0 && !green(r) && !r.leaked
-        && JSON.stringify(r.result || {}).includes('"trust-store-changed"');
+    : pre.loadTimeEqual && pre.trustedLater && impostorAnswers === 0 && !green(r) && !r.leaked && recorded;
   if (!ok) bad++;
   console.log(`  [${ok ? ' ok ' : 'FAIL'}] ${sc.name}`);
-  if (!sc.control) console.log(`         PRECONDITION store equals bundled at load time: ${pre.loadTimeEqual}; same count: ${pre.countEqual}; Node trusts the test CA: ${pre.trustedLater}`);
+  if (!sc.control) console.log(`         PRECONDITION store equals bundled at load time: ${pre.loadTimeEqual}; Node trusts the test CA: ${pre.trustedLater}; trust-store-changed recorded: ${recorded}`);
   console.log(`         exit ${r.code}, status ${r.result?.status ?? 'none'}, proofLevel ${r.result?.proofLevel ?? 'none'}, ` +
     `operators ${r.result ? Object.values(r.result.providers || {}).map((p) => p.provider?.operator).join(' + ') : 'none'}, ` +
     `tunnels ${tunnels.length}, impostor answers ${impostorAnswers}, leaked ${r.leaked}`);

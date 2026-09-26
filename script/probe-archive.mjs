@@ -125,7 +125,9 @@ class TrustChanged extends Error {}
 async function rpc(url, method, params) {
   // Trust is re-checked before EVERY https request, not only at startup: the eighth adversary pass had a
   // preload change the trust store one second after the startup check, and the impostor then answered.
-  if (url.startsWith('https:') && tlsWeakening().length) throw new TrustChanged();
+  // Decided from the PARSED scheme, which is what fetch uses: the ninth adversary pass showed `HTTPS://`,
+  // a leading space, or a tab inside the scheme skipping a raw `startsWith('https:')` test.
+  if (new URL(url).protocol === 'https:' && tlsWeakening().length) throw new TrustChanged();
   const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
   // The deadline is enforced by RACING every await against it, not by trusting fetch to honour its signal:
   // against a dripping provider (fourth adversary pass), undici left a pending body read unresolved after
