@@ -163,6 +163,23 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
 - `script/test-probe-native-output.mjs` and `script/test-probe-stream-wrapper.mjs` (both in CI), from the
   eleventh pass: two controls and five native-route cases, and a byte-identity check against an
   unwrapped reference. Against `86e60a2` all five cases and the byte check fail.
+- **Twelfth adversary pass, four more, three of them caused by the pass before:**
+  - `node --trace` printed every JavaScript call's arguments from native code, full URL included, hundreds of
+    times, and the run still reported success. The probe now refuses ANY Node command-line option except a
+    preload (`--require` / `--import`, operator code and out of scope), before anything reads a URL. That
+    one allowlist also covers the `--print-regexp-*` / `--trace-regexp-parser` and config-file flags found
+    earlier, and options not yet invented.
+  - Deleting each URL variable after reading it broke selecting the same provider for A and B (a false
+    "not set" and a false `ARCHIVE_UNAVAILABLE`). Each variable is now read once and remembered.
+  - Byte search lost the old regex's Unicode case-insensitivity for non-ASCII credentials. Real API keys are
+    ASCII, so a credential component with non-ASCII or control characters is now REFUSED before any call,
+    which also closes the raw non-UTF-8 and UTF-16 forms; UTF-16 is additionally added to the fragment set.
+    Three redaction scenarios that tested non-ASCII credentials now require that refusal.
+  - A credential split across the 64 KiB forced flush escaped, and bytes held without a newline were lost
+    when a signal (a CI cancel) killed the run. A forced flush now keeps the last (longest fragment - 1)
+    bytes, and SIGINT/SIGTERM/SIGHUP flush and then re-raise the same signal, so the process still dies by
+    it. `script/test-probe-wrapper-edges.mjs` (in CI), from this pass: a control and five cases; against
+    `b6091a5` all five fail.
 - **Stated limit:** debugging and profiling options that write process memory to FILES (for example
   `--heapsnapshot-signal`) can contain the URLs held in memory. They are not output or evidence, but such
   files must never be committed; only the probe's own `evidence/` directory is ever added, by path.

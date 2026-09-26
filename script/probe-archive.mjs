@@ -39,6 +39,27 @@ import { fileURLToPath } from 'node:url';
 // that. Excluded here, first, and the URL variables are also deleted from the environment once read.
 if (process.report) process.report.excludeEnv = true;
 
+// No Node command-line options, except preloads (--require / --import, which are operator code and out of
+// scope). The twelfth adversary pass showed `node --trace` printing every function's arguments from native
+// code, full URL and credential included, hundreds of times; earlier passes found three --print-regexp /
+// --trace-regexp options doing the same for the scrub pattern, and two config-file flags widening TLS trust.
+// An allowlist of none closes that family, including options not yet invented. It runs before anything
+// reads a URL. (NODE_OPTIONS cannot carry --trace; its trust effects are caught by tlsWeakening.)
+{
+  const bad = [];
+  const argv = process.execArgv;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--require' || a === '-r' || a === '--import') { i++; continue; }
+    if (a.startsWith('--require=') || a.startsWith('--import=')) continue;
+    bad.push(a.split('=')[0]);
+  }
+  if (bad.length) {
+    process.stderr.write(`REFUSING TO RUN: node options ${[...new Set(bad)].join(', ')} can print or change what this probe must keep secret or trust. Run it as: node script/probe-archive.mjs\n`);
+    process.exit(2);
+  }
+}
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, '..');
 const AS_PROOF = process.argv.includes('--as-proof');
@@ -273,7 +294,10 @@ const record = JSON.parse(readFileSync(join(HERE, 'providers.json'), 'utf8'));
 function resolveProvider(id) {
   const p = record.providers.find((x) => x.id === id);
   if (!p) return { id: 'unknown', error: 'the selected provider id is not listed in providers.json (it is not quoted here, in case it was a URL)' };
-  const url = process.env[p.urlEnv];
+  // Read ONCE and remembered, because the variable is deleted below: selecting the same provider for A and
+  // B read it a second time and falsely reported it unset (twelfth adversary pass).
+  if (!ENV_URLS.has(p.urlEnv)) ENV_URLS.set(p.urlEnv, process.env[p.urlEnv]);
+  const url = ENV_URLS.get(p.urlEnv);
   if (!url) return { id, error: `environment variable ${p.urlEnv} is not set` };
   let host, scheme; try { ({ host, protocol: scheme } = new URL(url)); } catch { return { id, error: `${p.urlEnv} is not a URL` }; }
   // HTTPS only (plain HTTP to a loopback test server excepted). Over plain HTTP, anything on the network
@@ -311,6 +335,8 @@ function resolveProvider(id) {
 
 /// id -> full URL, possibly key-bearing. Module-private and NEVER serialized.
 const URLS = new Map();
+/// env var name -> its value as first read. Module-private and NEVER serialized.
+const ENV_URLS = new Map();
 const urlOf = (p) => URLS.get(p.id);
 
 // ---- what counts as secret in a configured URL ----
@@ -369,6 +395,12 @@ function refuseUrlShape(url) {
   if (u.username || u.password) return 'carries user:password credentials, which this probe refuses';
   if (u.hash) return 'has a #fragment, which this probe refuses';
   for (const a of urlAtoms(u)) {
+    // ASCII only. Real API keys are ASCII, and a non-ASCII credential needs Unicode case folding and
+    // encoding forms (UTF-16, raw non-UTF-8 bytes) that byte search cannot match as the old regex's `i`
+    // flag did (twelfth adversary pass). Refusing it closes that whole class.
+    if (a.spellings.some((b) => b.some((x) => x > 0x7e || x < 0x20))) {
+      return 'has a path segment or query component with non-ASCII or control characters; only ASCII credentials can be redacted reliably, so the probe refuses it';
+    }
     if (a.spellings.some((b) => b.length < MIN_ATOM)) {
       return `has a path segment or query component shorter than ${MIN_ATOM} characters that is not a known generic part; it could not be redacted reliably, so the probe refuses it`;
     }
@@ -401,6 +433,7 @@ function secretFragments() {
           out.add(w.toString('latin1'));
           out.add(w.toString('utf8')); // a non-ASCII credential echoed as text
           out.add(w.toString('hex'));
+          out.add(Buffer.from(w.toString('latin1'), 'utf16le').toString('latin1')); // a UTF-16 write
           out.add(encodeURIComponent(w.toString('utf8')));
           out.add([...w].map((x) => '%' + x.toString(16).padStart(2, '0')).join('')); // every byte escaped
         }
@@ -459,7 +492,12 @@ function scrub(text) { return scrubBytes(Buffer.from(String(text), 'utf8')).toSt
   // encoding, held until a newline so a credential cannot be split across two writes and escape the
   // search. Pending bytes are flushed (scrubbed) on exit, and at 64 KiB. (NODE_DEBUG_NATIVE writes from native
   // code and cannot be scrubbed from JavaScript, so resolveProvider refuses to run with it set.)
+  const flushers = [];
   const MAX_PENDING = 64 * 1024;
+  // When a line exceeds MAX_PENDING it is flushed in part, KEEPING the last (longest fragment - 1) bytes, so
+  // a credential straddling the cut is still whole in the next search (twelfth adversary pass).
+  const keepTail = () => Math.max(0, ...secretFragmentBytes().map((f) => f.length)) - 1;
+  let exiting = false;
   for (const stream of [process.stdout, process.stderr]) {
     const write = stream.write.bind(stream);
     let pending = Buffer.alloc(0);
@@ -470,13 +508,22 @@ function scrub(text) { return scrubBytes(Buffer.from(String(text), 'utf8')).toSt
       else if (chunk instanceof Uint8Array) buf = Buffer.from(chunk);
       else return write(chunk, encoding, cb);
       pending = pending.length ? Buffer.concat([pending, buf]) : buf;
-      const cut = pending.length > MAX_PENDING ? pending.length : pending.lastIndexOf(0x0a) + 1;
+      const cut = exiting ? pending.length
+        : pending.length > MAX_PENDING ? Math.max(pending.lastIndexOf(0x0a) + 1, pending.length - keepTail())
+        : pending.lastIndexOf(0x0a) + 1;
       if (cut === 0) { if (done) process.nextTick(done); return true; }
       const ready = pending.subarray(0, cut);
       pending = pending.subarray(cut);
       return write(scrubBytes(ready), done);
     };
-    process.on('exit', () => { if (pending.length) { const rest = pending; pending = Buffer.alloc(0); write(scrubBytes(rest)); } });
+    const flush = () => { exiting = true; if (pending.length) { const rest = pending; pending = Buffer.alloc(0); write(scrubBytes(rest)); } };
+    process.on('exit', flush);
+    flushers.push(flush);
+  }
+  // A default signal death emits no 'exit', so held bytes would be lost on a CI cancel: flush, then re-raise
+  // the same signal with the handler gone, so the process still dies BY that signal exactly as before.
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.once(sig, () => { for (const f of flushers) f(); process.kill(process.pid, sig); });
   }
   const err = console.error.bind(console);
   // An uncaught error's message can quote provider data too. Print it scrubbed, then fail.

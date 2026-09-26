@@ -68,6 +68,9 @@ jobs:
       - name: Archive probe's output wrapper passes bytes through unchanged
         run: node script/test-probe-stream-wrapper.mjs
 
+      - name: Archive probe wrapper edges (node options, repeated provider, split writes, non-ASCII keys, signals)
+        run: node script/test-probe-wrapper-edges.mjs
+
       - name: Run Forge fmt
         run: forge fmt --check
 

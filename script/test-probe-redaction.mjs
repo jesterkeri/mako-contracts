@@ -319,11 +319,13 @@ const scenarios = [
     check: (r) => written(r, [NUMKEY]),
   },
   {
-    name: 'ATOM: path credential with a non-UTF-8 escape, echoed as decoded bytes in hex',
+    // Since the twelfth adversary pass a non-ASCII credential is REFUSED before any call, so it can never be
+    // echoed; these three cases now require that refusal, with the reason, and nothing leaked.
+    name: 'CONFIG: a path credential with a non-UTF-8 escape is refused before any call',
     mode: 'atom-hex-decoded-path',
     opts: {},
     env: { MAKO_RPC_MOCK_A: `http://${HOST}/v2/%FF${SENTINELS[0]}`, MAKO_RPC_MOCK_B: urlB },
-    check: (r) => written(r),
+    check: (r) => refusedAtConfig(r) && r.out.includes('non-ASCII'),
   },
   {
     name: 'LAST-LINE GUARD: a SHARED well-formed return carrying part of a credential is refused (exit 5)',
@@ -361,16 +363,16 @@ const scenarios = [
     check: (r) => r.code === 5 && r.resultText === null && clean(r),
   },
   {
-    name: 'LAST-LINE GUARD: a bug writing 10 characters of a non-ASCII credential is refused (exit 5)',
-    opts: { reintroduceBug: 'decoded-query-10' },
+    name: 'CONFIG: a non-ASCII (accented) query credential is refused before any call',
+    opts: {},
     env: { MAKO_RPC_MOCK_A: `http://${HOST}/v2/${SENTINELS[0]}?apikey=${encodeURIComponent(SENTINELS[8])}`, MAKO_RPC_MOCK_B: urlB },
-    check: (r) => r.code === 5 && r.resultText === null && clean(r),
+    check: (r) => refusedAtConfig(r) && r.out.includes('non-ASCII'),
   },
   {
-    name: 'LAST-LINE GUARD: a bug writing 10 CJK characters of a credential is refused (exit 5)',
-    opts: { reintroduceBug: 'decoded-query-last-10' },
+    name: 'CONFIG: a CJK query credential is refused before any call',
+    opts: {},
     env: { MAKO_RPC_MOCK_A: `http://${HOST}/v2/${SENTINELS[0]}?apikey=${encodeURIComponent(SENTINELS[9])}`, MAKO_RPC_MOCK_B: urlB },
-    check: (r) => r.code === 5 && r.resultText === null && clean(r),
+    check: (r) => refusedAtConfig(r) && r.out.includes('non-ASCII'),
   },
   // ---- third adversary pass ----
   {
