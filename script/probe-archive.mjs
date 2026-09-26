@@ -285,6 +285,7 @@ function resolveProvider(id) {
     return { id, error: `TLS certificate checking is weakened in this environment: ${weakened.join('; ')}. No certificate can then prove which operator answers; remove the setting and re-run` };
   }
   if (host !== p.host) return { id, error: `resolved host "${host}" is not the approved host "${p.host}" for provider "${id}"` };
+  if (process.env.NODE_DEBUG_NATIVE) return { id, error: 'NODE_DEBUG_NATIVE is set; native debug output bypasses redaction, so the probe refuses to run with it' };
   const refused = refuseUrlShape(url);
   if (refused) return { id, error: `${p.urlEnv} ${refused}` };
   // THE URL NEVER ENTERS THE PROVIDER OBJECT. It goes into a private map that nothing serializes, and
@@ -413,16 +414,32 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 /// on ALL console output, so a provider string that slips through some future code path still cannot put
 /// a credential in a log. It is the stdout counterpart of `writeEvidence`'s refusal. A single alternation,
 /// longest first, so overlapping windows leave no run of WINDOW credential characters behind.
+let scrubCache = { key: null, re: null };
 function scrub(text) {
-  const frags = secretFragments();
-  if (!frags.length) return String(text);
-  return String(text).replace(new RegExp(frags.map(escapeRe).join('|'), 'gi'), '[redacted]');
+  const key = [...URLS.values()].join('\n');
+  if (scrubCache.key !== key) {
+    const frags = secretFragments();
+    scrubCache = { key, re: frags.length ? new RegExp(frags.map(escapeRe).join('|'), 'gi') : null };
+  }
+  return scrubCache.re ? String(text).replace(scrubCache.re, '[redacted]') : String(text);
 }
 {
-  const log = console.log.bind(console);
+  // Scrubbed at the STREAM, not at console: the tenth adversary pass showed NODE_DEBUG=fetch making Node's
+  // bundled undici print every request URL, credential included, through util.debuglog straight to
+  // process.stderr, never touching a console wrapper. Everything JavaScript in this process writes to stdout
+  // or stderr passes here. (Native debug output, NODE_DEBUG_NATIVE, writes to the file descriptor directly
+  // and cannot be scrubbed from JavaScript, so resolveProvider refuses to run with it set.)
+  for (const stream of [process.stdout, process.stderr]) {
+    const write = stream.write.bind(stream);
+    stream.write = (chunk, encoding, cb) => {
+      const done = typeof encoding === 'function' ? encoding : cb;
+      if (typeof chunk === 'string' || chunk instanceof Uint8Array) {
+        return write(scrub(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8')), done);
+      }
+      return write(chunk, encoding, cb);
+    };
+  }
   const err = console.error.bind(console);
-  console.log = (...a) => log(...a.map(scrub));
-  console.error = (...a) => err(...a.map(scrub));
   // An uncaught error's message can quote provider data too. Print it scrubbed, then fail.
   process.on('uncaughtException', (e) => { err(scrub(`uncaught: ${e?.message ?? e}`)); process.exit(1); });
   process.on('unhandledRejection', (e) => { err(scrub(`unhandled: ${e?.message ?? e}`)); process.exit(1); });

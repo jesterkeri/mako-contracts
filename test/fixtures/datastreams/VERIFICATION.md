@@ -140,6 +140,14 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
   padding to a 32-byte boundary and nothing after. Non-zero padding and a trailing extra word were accepted.
 - **Redirects are refused.** A provider answering 3xx would have had its calls served by whoever it
   pointed at, so the "two distinct operators" of the proof would not have been the ones answering.
+- **Output is scrubbed at the stream, not at `console`.** The tenth adversary pass showed `NODE_DEBUG=fetch`
+  (or `undici`, or `*`) making Node's bundled undici print every request URL, credential included, through
+  `util.debuglog` straight to `process.stderr`, past the console-level scrubber, on honest and failing runs
+  alike. `process.stdout.write` and `process.stderr.write` are now wrapped, so everything JavaScript in the
+  process prints is scrubbed. `NODE_DEBUG_NATIVE` writes from native code directly to the file descriptor,
+  which JavaScript cannot scrub, so the probe refuses to run with it set. `script/test-probe-debuglog.mjs`
+  (in CI), from the tenth pass plus the native case: a control and five cases; against `10f8323` all five
+  fail.
 - **A failed identity read says which read and why.** Evidence records each unserved read's attempts as
   categories and HTTP status. On 2026-09-26 a new key pasted with a trailing ` \` from an example
   command failed every call with 401, and the record said only "not served".
