@@ -50,6 +50,9 @@ jobs:
       - name: Archive probe refuses weakened TLS and non-canonical identity strings
         run: node script/test-probe-tls.mjs
 
+      - name: Archive probe refuses every form of widened TLS trust (checks the trust store, not setting names)
+        run: node script/test-probe-tls-bypass.mjs
+
       - name: Run Forge fmt
         run: forge fmt --check
 

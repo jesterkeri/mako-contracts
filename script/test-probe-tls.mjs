@@ -116,7 +116,7 @@ async function runProbe(env) {
   const dir = tree();
   try {
     const base = { ...process.env };
-    for (const k of ['NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_EXTRA_CA_CERTS', 'NODE_USE_ENV_PROXY', 'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'NO_PROXY', 'no_proxy', 'NODE_OPTIONS', 'SSL_CERT_FILE', 'SSL_CERT_DIR']) delete base[k];
+    for (const k of ['NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_EXTRA_CA_CERTS', 'NODE_USE_ENV_PROXY', 'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'NO_PROXY', 'no_proxy', 'NODE_OPTIONS', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_USE_SYSTEM_CA', 'OPENSSL_CONF']) delete base[k];
     const r = await new Promise((resolve) => {
       const child = spawn('node', [join(dir, 'script/probe-archive.mjs')], { env: { ...base, ...env } });
       const kill = setTimeout(() => child.kill('SIGKILL'), RUN_BUDGET_MS);

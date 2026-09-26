@@ -118,11 +118,19 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
   the network path, or a proxy Node is configured to use (`NODE_USE_ENV_PROXY` with `HTTP_PROXY`), can
   answer in the endpoint's place; the fifth adversary pass showed a proxy answering every call while the
   evidence recorded both operators as served. Over HTTPS a proxy only tunnels.
-- **HTTPS counts only while certificate checking is intact.** The sixth adversary pass put an impostor TLS
-  server behind a proxy and showed that `NODE_TLS_REJECT_UNAUTHORIZED=0`, or `NODE_EXTRA_CA_CERTS` naming the
-  impostor's CA, let it answer for BOTH operators and go `VERIFIED_MATCH`. An https provider is now refused
-  when any of these is set: `NODE_TLS_REJECT_UNAUTHORIZED` other than `1`, `NODE_EXTRA_CA_CERTS`, or
-  `--use-openssl-ca` / `--use-system-ca` in `NODE_OPTIONS` or the node flags. Only the names are printed.
+- **HTTPS counts only while certificate checking is intact, and that is checked by its RESULT.** The sixth
+  adversary pass put an impostor TLS server behind a proxy and showed `NODE_TLS_REJECT_UNAUTHORIZED=0`, or
+  `NODE_EXTRA_CA_CERTS` naming the impostor's CA, letting it answer for BOTH operators and go
+  `VERIFIED_MATCH`. A list of those setting names (`e06aad4`) was then bypassed six ways by the seventh
+  pass: `NODE_USE_SYSTEM_CA`, a quoted or underscore spelling in `NODE_OPTIONS`, two config-file flags,
+  and a preload calling `tls.setDefaultCACertificates`. So an https provider is now refused unless the
+  trust store Node actually uses is EXACTLY its bundled CA set (`tls.getCACertificates('default')` equals
+  `'bundled'`), and unless `NODE_TLS_REJECT_UNAUTHORIZED` is not `0`, the only value Node honours. Measured
+  on Node 22.23.2: 145 bundled; `NODE_EXTRA_CA_CERTS` gives 146, `NODE_USE_SYSTEM_CA` 509, and
+  `--use-openssl-ca` 0 (not enumerable, still unequal). Stated limit: code the operator chooses to run
+  inside the process (a `--require`/`--import` preload) can replace `fetch` or write any evidence it
+  likes, and no in-process check bounds that; the preload tested here is caught only because it changes
+  the trust store.
 - **`typeAndVersion` must be encoded exactly as a contract returns it:** offset 32, length, the bytes, zero
   padding to a 32-byte boundary and nothing after. Non-zero padding and a trailing extra word were accepted.
 - **Redirects are refused.** A provider answering 3xx would have had its calls served by whoever it
@@ -175,7 +183,11 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
   a throwaway CA, an impostor TLS server and a CONNECT proxy, with two controls (with checking intact the
   proxy is used and the impostor cannot answer; the canonical encoding goes green) and five cases (the
   three weakened-TLS settings, refused with the TLS message, and the two non-canonical encodings). Against
-  `0fb84df` exactly the five cases fail and both controls pass. The adversaries' own tests pass against this version. The `+`-in-a-path spelling is covered by construction, not by a separate case. The non-UTF-8 case is a regression case only: the windows of the escaped
+  `0fb84df` exactly the five cases fail and both controls pass.
+- `script/test-probe-tls-bypass.mjs` (in CI; needs `openssl`) was written by the seventh adversary pass and
+  adopted: a control plus the six bypasses, each with a PRECONDITION showing, outside the probe, that the
+  setting really does make Node trust the impostor. A pass means the impostor answered nothing and the
+  run is not green. Against `e06aad4` all six fail and the control passes; against this version all pass. The adversaries' own tests pass against this version. The `+`-in-a-path spelling is covered by construction, not by a separate case. The non-UTF-8 case is a regression case only: the windows of the escaped
   spelling already cover its ASCII part, so it does not isolate the bytewise decoder.
 - **Out of scope, stated so nobody relies on it:** a provider that deliberately transforms the key it
   holds beyond these encodings, for example by interleaving its bytes, cannot be caught by any string

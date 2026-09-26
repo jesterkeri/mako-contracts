@@ -29,6 +29,7 @@
 // URLs come from the environment so a key-bearing endpoint is never committed. See providers.json.
 
 import { createHash } from 'node:crypto';
+import tls from 'node:tls';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -274,7 +275,7 @@ function resolveProvider(id) {
   // proxy answer for BOTH operators, and the run went VERIFIED_MATCH as two distinct operators.
   const weakened = tlsWeakening();
   if (scheme === 'https:' && weakened.length) {
-    return { id, error: `TLS certificate checking is weakened in this environment (${weakened.join(', ')}), so no certificate can prove which operator answers; unset it and re-run` };
+    return { id, error: `TLS certificate checking is weakened in this environment: ${weakened.join('; ')}. No certificate can then prove which operator answers; remove the setting and re-run` };
   }
   if (host !== p.host) return { id, error: `resolved host "${host}" is not the approved host "${p.host}" for provider "${id}"` };
   const refused = refuseUrlShape(url);
@@ -443,18 +444,32 @@ function proofLevel(a, b) {
     ? 'two-distinct-operators' : 'one-domain';
 }
 
-/// The environment settings that disable or widen Node's certificate checking, BY NAME (never their values).
-/// Node's bundled CA store with full verification is the only trust this probe's operator claim rests on.
+/// Why certificate checking in THIS process cannot be trusted to name the operator who answers, or [].
+///
+/// A POSITIVE check of the result, not a list of setting names. The sixth adversary pass showed two
+/// settings that let an impostor answer for both operators; a name list for them was then bypassed six more
+/// ways (NODE_USE_SYSTEM_CA, a quoted or underscore spelling in NODE_OPTIONS, two config-file flags, a
+/// preload calling tls.setDefaultCACertificates). Every one of them changes the trust store Node actually
+/// uses, so the rule is: that store must be EXACTLY Node's bundled CA set. Measured on Node 22.23.2: 145
+/// bundled; NODE_EXTRA_CA_CERTS makes it 146, NODE_USE_SYSTEM_CA 509, --use-openssl-ca 0 (OpenSSL's store is
+/// not enumerable, which is still not equal). NODE_TLS_REJECT_UNAUTHORIZED=0 turns checking off without
+/// touching the store, so it is checked by its exact value, the one Node honours.
+///
+/// Out of scope, stated rather than implied: code the operator chose to run inside this process (a
+/// --require or --import preload) can replace fetch itself or write any evidence it likes; no check made
+/// from inside the same process can bound that.
 function tlsWeakening() {
   const found = [];
-  const reject = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
-  if (reject !== undefined && reject !== '1') found.push('NODE_TLS_REJECT_UNAUTHORIZED');
-  if (process.env.NODE_EXTRA_CA_CERTS) found.push('NODE_EXTRA_CA_CERTS');
-  const flags = [...process.execArgv, ...String(process.env.NODE_OPTIONS || '').split(/\s+/)];
-  for (const f of ['--use-openssl-ca', '--use-system-ca']) {
-    if (flags.some((x) => x === f || x.startsWith(f + '='))) found.push(f);
+  if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') found.push('NODE_TLS_REJECT_UNAUTHORIZED=0 disables certificate checking');
+  if (typeof tls.getCACertificates !== 'function') {
+    found.push('this Node version cannot report its trust store, so it cannot be shown to be the bundled one');
+  } else {
+    const effective = tls.getCACertificates('default');
+    const bundled = new Set(tls.getCACertificates('bundled'));
+    const same = effective.length === bundled.size && effective.every((c) => bundled.has(c));
+    if (!same) found.push(`the trust store is not Node's bundled CA set (${effective.length} certificates in use, ${bundled.size} bundled)`);
   }
-  return [...new Set(found)];
+  return found;
 }
 
 // ---- identity, asserted before any answer is trusted ----
