@@ -106,10 +106,54 @@ function encodeVerifyCall(fullReport) {
 }
 
 // ---- JSON-RPC ----
+//
+// Every request is BOUNDED, because the provider is untrusted (fourth adversary pass on round 5): with no
+// deadline, a provider sending HTTP 200 and then one byte a second held the run forever, so no evidence and
+// no classification were ever written; undici's own idle timer restarts on every byte. So:
+//   - one total deadline per request, headers and body together (RPC_TIMEOUT_MS);
+//   - the body is read to at most MAX_RESPONSE_BYTES, then abandoned;
+//   - redirects are refused. A provider answering 3xx would otherwise have the call served by whoever it
+//     points at, and the "two distinct operators" of the proof would not be the ones answering.
+// Each failure is a retried, categorised attempt; after the budget the call is not served, and the run
+// is classified ARCHIVE_UNAVAILABLE with evidence written.
+const RPC_TIMEOUT_MS = Math.min(Math.max(Number(process.env.MAKO_PROBE_RPC_TIMEOUT_MS) || 20_000, 500), 60_000);
+const MAX_RESPONSE_BYTES = 4 * 1024 * 1024; // a Monad block's hash list and the 7 KB verifier code fit many times over
+class Oversized extends Error {}
+
 async function rpc(url, method, params) {
   const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
-  const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
-  const text = await res.text();
+  // The deadline is enforced by RACING every await against it, not by trusting fetch to honour its signal:
+  // against a dripping provider (fourth adversary pass), undici left a pending body read unresolved after
+  // abort() on the fourth retry, and the run hung. Reproduced outside the probe on Node 22.23. An explicit
+  // timer is used rather than `AbortSignal.timeout()`, and the stream is cancelled when the deadline wins.
+  const controller = new AbortController();
+  const deadline = new Promise((_, reject) => controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true }));
+  deadline.catch(() => {});
+  const timer = setTimeout(() => controller.abort(new DOMException('deadline', 'TimeoutError')), RPC_TIMEOUT_MS);
+  let res, text, reader;
+  try {
+    res = await Promise.race([
+      fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body, redirect: 'error', signal: controller.signal }),
+      deadline,
+    ]);
+    const chunks = [];
+    let size = 0;
+    reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await Promise.race([reader.read(), deadline]);
+      if (done) break;
+      size += value.length;
+      if (size > MAX_RESPONSE_BYTES) throw new Oversized();
+      chunks.push(value);
+    }
+    text = Buffer.concat(chunks).toString('utf8');
+  } catch (e) {
+    reader?.cancel().catch(() => {});
+    controller.abort();
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
   let parsed; try { parsed = JSON.parse(text); } catch { parsed = null; }
   // The raw response text is NOT returned: it is provider-controlled and may echo the request URL. Only its
   // hash leaves this function, for correlation.
@@ -124,7 +168,13 @@ async function rpcWithRetry(url, method, params) {
     let r;
     try { r = await rpc(url, method, params); }
     // A transport error's message can carry the URL (and its cause can), so only a fixed category is kept.
-    catch { attempts.push({ attempt: i, category: 'transport' }); await sleep(delay); delay = Math.min(delay * 2, RETRY_CAP_MS); continue; }
+    // Only the error's TYPE is used, never its message.
+    catch (e) {
+      const category = e instanceof Oversized ? 'oversized' : e?.name === 'TimeoutError' || e?.name === 'AbortError' ? 'timeout' : 'transport';
+      attempts.push({ attempt: i, category });
+      if (i < RETRY_ATTEMPTS) { await sleep(delay); delay = Math.min(delay * 2, RETRY_CAP_MS); }
+      continue;
+    }
     const err = r.body?.error;
     const served = r.httpStatus === 200 && (r.body?.result !== undefined || isRevert(err));
     attempts.push({ attempt: i, httpStatus: r.httpStatus, rpcCode: rpcCodeOf(err), category: categorize(err, r.httpStatus), served });
@@ -322,6 +372,7 @@ function secretFragments() {
           out.add(w.toString('utf8')); // a non-ASCII credential echoed as text
           out.add(w.toString('hex'));
           out.add(encodeURIComponent(w.toString('utf8')));
+          out.add([...w].map((x) => '%' + x.toString(16).padStart(2, '0')).join('')); // every byte escaped
         }
         // Base64 in whole 3-byte groups, so each fragment's characters do not depend on the next byte. Any
         // echo of WINDOW consecutive credential bytes contains a 6-byte run on a 3-byte boundary.
@@ -391,8 +442,17 @@ async function identity(p, block) {
     call(SEL_TYPE_AND_VERSION),
     rpcWithRetry(urlOf(p), 'eth_getBlockByNumber', [at, false]),
   ]);
-  const notServed = [cid, code, fm, ac, tv, blk].some((r) => !r.served);
-  if (notServed) return { served: false, reason: 'one or more identity reads were not served within the retry budget' };
+  const reads = { eth_chainId: cid, eth_getCode: code, s_feeManager: fm, s_accessController: ac, typeAndVersion: tv, eth_getBlockByNumber: blk };
+  const unserved = Object.entries(reads).filter(([, r]) => !r.served);
+  if (unserved.length) {
+    // WHICH read failed and how, as local categories and codes only. Without this, a mistyped key (401 on
+    // every attempt) and a pruned block looked identical in the evidence.
+    return {
+      served: false,
+      reason: 'one or more identity reads were not served within the retry budget',
+      unserved: Object.fromEntries(unserved.map(([name, r]) => [name, r.attempts])),
+    };
+  }
   // EVERY VALUE BELOW IS PROVIDER-CHOSEN, so none is recorded verbatim unless it equals its pin; any other
   // value becomes `MISMATCH sha256:<hash>`. Before round 5 the addresses were the last 40 hex characters of
   // whatever came back, so a result carrying a hex-encoded credential would have been TRUNCATED into
@@ -500,7 +560,12 @@ const held = {}; // provider-chosen verify bytes, recorded only if shared; see b
 for (const p of [A, B]) {
   console.log(`--- ${p.id} (${p.host}) ---`);
   const ident = await identity(p, DEFAULT_TARGET.block);
-  if (!ident.served) { console.log(`  identity: NOT SERVED`); results[p.id] = { provider: p, identity: ident, status: 'ARCHIVE_UNAVAILABLE' }; continue; }
+  if (!ident.served) {
+    for (const [name, attempts] of Object.entries(ident.unserved)) {
+      const last = attempts[attempts.length - 1] || {};
+      console.log(`  ${name}: not served after ${attempts.length} attempt(s), last: ${last.category}${last.httpStatus ? `, HTTP ${last.httpStatus}` : ''}`);
+    }
+    console.log(`  identity: NOT SERVED`); results[p.id] = { provider: p, identity: ident, status: 'ARCHIVE_UNAVAILABLE' }; continue; }
 
   // The runtime code is identified by its HASH, not merely its length: PROOF_STANDARD §9 requires
   // the contract whose answers are trusted to be identified by its code, and a length check alone

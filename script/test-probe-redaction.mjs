@@ -83,7 +83,27 @@ const server = createServer((req, res) => {
     }
     if (isVerify && MODE === 'ground-hash') return ok(GROUND_RESULT);
     // Third adversary pass: inputs that crashed the run (exit 1, no evidence) rather than leaked.
-    if (MODE === 'huge-code' && method === 'eth_getCode') return ok('0x' + 'ab'.repeat(6_000_000));
+    // Fourth adversary pass: provider A (identified by its credential) stalls or redirects.
+    const isA = pathAtom === SENTINELS[0];
+    if (MODE === 'drip' && isA && method === 'eth_chainId') {
+      // HTTP 200, the start of a valid answer, then one byte of whitespace every 200 ms, never finishing.
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.write(`{"jsonrpc":"2.0","id":${id},"result":"0x279f"`);
+      const t = setInterval(() => res.write(' '), 200);
+      res.on('close', () => clearInterval(t));
+      return;
+    }
+    if (MODE === 'unauthorized' && isA) {
+      // Every call from provider A rejected as unauthenticated, as a mistyped key is (2026-09-26).
+      res.writeHead(401, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32600, message: `Must be authenticated! ${req.url}` } }));
+    }
+    if (MODE === 'redirect' && isA) {
+      // Every call from provider A is sent to provider B's endpoint instead.
+      res.writeHead(307, { location: `http://${HOST}/v2/${SENTINELS[2]}?apikey=${SENTINELS[3]}` });
+      return res.end();
+    }
+    if (MODE === 'huge-code' && isA && method === 'eth_getCode') return ok('0x' + 'ab'.repeat(6_000_000));
     if (MODE === 'object-hash' && method === 'eth_getBlockByNumber') {
       return ok({ number: '0x3c01d5b', hash: { toString: 1, note: req.url }, timestamp: '0x6aaa0c48' });
     }
@@ -139,6 +159,7 @@ function tree({ reintroduceBug = false } = {}) {
       // 10 characters spanning the quote, so no quote-free 10-character run exists to match unescaped.
       'decoded-query': "new URL(urlOf(A)).searchParams.get('apikey').slice(3, 13)",
       'decoded-query-10': "new URL(urlOf(A)).searchParams.get('apikey').slice(0, 10)",
+      'pct-bytes': "[...Buffer.from(urlOf(A).slice(-11, -1))].map((x) => '%' + x.toString(16).padStart(2, '0')).join('')",
       'decoded-query-last-10': "Array.from(new URL(urlOf(A)).searchParams.get('apikey')).slice(-10).join('')",
     }[reintroduceBug] || 'urlOf(A)';
     const patched = src.replace('status,\n  proofLevel: level,', `status,\n  leakedUrl: ${leak},\n  proofLevel: level,`);
@@ -151,15 +172,19 @@ function tree({ reintroduceBug = false } = {}) {
 // ASYNC, deliberately: the mock server runs in this same process, so a synchronous spawn would block the
 // event loop and the server could never answer the probe it is waiting on. The first draft did exactly
 // that and deadlocked.
+// Every run is KILLED after RUN_BUDGET_MS, so a probe that hangs fails its scenario (code null) instead of
+// hanging this test and the CI job with it.
+const RUN_BUDGET_MS = 120_000;
 async function runProbe(dir, env) {
   const r = await new Promise((resolve) => {
     const child = spawn('node', [join(dir, 'script/probe-archive.mjs')], {
       env: { ...process.env, MAKO_PROVIDER_A: 'mock-a', MAKO_PROVIDER_B: 'mock-b', ...env },
     });
+    const kill = setTimeout(() => child.kill('SIGKILL'), RUN_BUDGET_MS);
     let stdout = '', stderr = '';
     child.stdout.on('data', (d) => (stdout += d));
     child.stderr.on('data', (d) => (stderr += d));
-    child.on('close', (status) => resolve({ status, stdout, stderr }));
+    child.on('close', (status) => { clearTimeout(kill); resolve({ status, stdout, stderr }); });
   });
   const evDir = join(dir, 'test/fixtures/datastreams/evidence');
   const runs = existsSync(evDir) ? readdirSync(evDir) : [];
@@ -200,7 +225,11 @@ const GROUND_RESULT = '0x000000001c0a4437';
   if (!h.includes('6535897932') || !GROUND_DIGITS.includes('6535897932')) throw new Error('GROUND fixture no longer grinds');
 }
 const clean = (r, extra) => leaks(r.resultText, extra).length === 0 && leaks(r.out, extra).length === 0;
-const written = (r, extra) => r.resultText !== null && clean(r, extra);
+// "Evidence written" alone is also what a probe that can read NOTHING produces (a transport bug once made
+// every request throw, and most scenarios still passed). So a written run must also show the HONEST
+// provider, mock-b, actually served and identified: the hostile data was really read and handled.
+const honestServed = (r) => { try { return JSON.parse(r.resultText).providers['mock-b'].identity.served === true; } catch { return false; } };
+const written = (r, extra) => r.resultText !== null && clean(r, extra) && honestServed(r);
 const refusedAtConfig = (r, extra) => r.code === 2 && r.resultText !== null && clean(r, extra);
 
 const scenarios = [
@@ -332,7 +361,39 @@ const scenarios = [
     env: { ...both, MAKO_PROVIDER_A: SENTINELS[10] },
     check: (r) => refusedAtConfig(r),
   },
-  { name: 'ROBUST: a 12 MB eth_getCode result is classified, not a crash', mode: 'huge-code', opts: {}, env: both, check: (r) => r.code === 3 && written(r) },
+  { name: 'ROBUST: a 12 MB eth_getCode result is refused as oversized and classified, not a crash', mode: 'huge-code', opts: {}, env: both, check: (r) => r.code === 3 && written(r) },
+  // ---- fourth adversary pass ----
+  {
+    name: 'ROBUST: a provider dripping one byte at a time is timed out and classified, not waited on forever',
+    mode: 'drip',
+    opts: {},
+    env: { ...both, MAKO_PROBE_RPC_TIMEOUT_MS: '1500' },
+    check: (r) => r.code === 3 && written(r) && JSON.parse(r.resultText).status === 'ARCHIVE_UNAVAILABLE',
+  },
+  {
+    name: 'OPERATOR: a provider redirecting its calls elsewhere is refused, not answered by the other endpoint',
+    mode: 'redirect',
+    opts: {},
+    env: both,
+    check: (r) => r.code === 3 && written(r) && JSON.parse(r.resultText).status === 'ARCHIVE_UNAVAILABLE',
+  },
+  {
+    name: 'DIAGNOSTICS: a provider rejecting every call (a mistyped key) is recorded as HTTP 401 per read, nothing leaked',
+    mode: 'unauthorized',
+    opts: {},
+    env: { ...both, MAKO_PROBE_RPC_TIMEOUT_MS: '1500' },
+    check: (r) => {
+      if (!(r.code === 3 && written(r))) return false;
+      const u = JSON.parse(r.resultText).providers['mock-a'].identity.unserved || {};
+      return Object.keys(u).length === 6 && Object.values(u).every((a) => a.every((x) => x.httpStatus === 401));
+    },
+  },
+  {
+    name: 'LAST-LINE GUARD: a bug writing 10 credential bytes with EVERY byte percent-escaped is refused (exit 5)',
+    opts: { reintroduceBug: 'pct-bytes' },
+    env: both,
+    check: (r) => r.code === 5 && r.resultText === null && clean(r),
+  },
   { name: 'ROBUST: a block hash that is an object with a non-callable toString', mode: 'object-hash', opts: {}, env: both, check: (r) => r.code === 3 && written(r) },
   { name: 'ROBUST: an error message that is an object carrying the URL', mode: 'object-message', opts: {}, env: both, check: (r) => r.code === 3 && written(r) },
   {

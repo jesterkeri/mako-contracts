@@ -104,10 +104,21 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
 - **The provider id is never quoted back.** An id from `MAKO_PROVIDER_A`/`B` is recorded only if
   `providers.json` lists it; an unknown one, which could be a URL pasted into the wrong variable, is
   reported as unknown without being printed or recorded (third adversary pass).
+- **A hostile provider cannot hang the run either (fourth adversary pass).** A provider sending HTTP 200
+  and then one byte a second held the run forever, with no evidence and no classification. Every request
+  now has one total deadline (20 s, headers and body) and a 4 MiB body cap, and each failure is a
+  retried, categorised attempt (`timeout`, `oversized`, `transport`). The deadline is enforced by racing
+  every await against it: Node 22.23's `fetch` was shown, outside the probe, to leave a pending body read
+  unresolved after `abort()` on a fourth retry, so trusting the signal alone still hung.
+- **Redirects are refused.** A provider answering 3xx would have had its calls served by whoever it
+  pointed at, so the "two distinct operators" of the proof would not have been the ones answering.
+- **A failed identity read says which read and why.** Evidence records each unserved read's attempts as
+  categories and HTTP status. On 2026-09-26 a new key pasted with a trailing ` \` from an example
+  command failed every call with 401, and the record said only "not served".
 - **A hostile provider cannot crash the run instead of being classified.** Hex is checked without a
   repeated capture group, which overflowed the regex stack on a multi-megabyte value, and provider values
   are turned into text for hashing with `JSON.stringify`, never through a provider-chosen `toString`.
-- `test-probe-redaction.mjs` has 36 scenarios:
+- `test-probe-redaction.mjs` has 40 scenarios:
   - each credential alone in error text and in base64;
   - hex as a malformed result and as a well-formed unshared result;
   - truncated into an address word, as the block hash, and echoed percent-decoded;
@@ -122,12 +133,20 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
     10 characters of a non-ASCII credential, and 10 CJK characters of a credential;
   - from the third adversary pass: a URL, and a key-shaped string, pasted as the provider id, and three
     inputs that used to crash the run (a 12 MB `eth_getCode` result, a block hash and an error message
-    that are objects with a non-callable `toString`).
+    that are objects with a non-callable `toString`);
+  - from the fourth adversary pass: a provider dripping one byte at a time, a provider redirecting every
+    call to the other endpoint, a provider rejecting every call with 401, and a guard case writing 10
+    credential bytes with every byte percent-escaped.
+
+  A written-evidence scenario also requires the HONEST provider to have been read and identified. Without
+  that, a transport bug introduced while fixing the hang made every request throw, and 35 of 40
+  scenarios still passed, because "evidence written, exit 3" is also what a probe that reads nothing
+  produces.
 
   A leak means any 10-character window of a credential, plain or hex. **Against `8f4e3b0` (the first
   round-5 fix) 7 of the 25 then present failed, and against `153fa0c` exactly the four cases added for
   the second pass fail while their control passes, and against `f424a9c` exactly the six cases added
-  for the third pass fail.** The adversaries' own tests pass against this version. The `+`-in-a-path spelling is covered by construction, not by a separate case. The non-UTF-8 case is a regression case only: the windows of the escaped
+  for the third pass fail, and against `c222b69` exactly the four cases added for the fourth pass fail.** The adversaries' own tests pass against this version. The `+`-in-a-path spelling is covered by construction, not by a separate case. The non-UTF-8 case is a regression case only: the windows of the escaped
   spelling already cover its ASCII part, so it does not isolate the bytewise decoder.
 - **Out of scope, stated so nobody relies on it:** a provider that deliberately transforms the key it
   holds beyond these encodings, for example by interleaving its bytes, cannot be caught by any string
