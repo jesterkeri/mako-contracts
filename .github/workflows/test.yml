@@ -47,6 +47,9 @@ jobs:
       - name: Archive probe never writes or prints an RPC URL, even when a provider echoes it
         run: node script/test-probe-redaction.mjs
 
+      - name: Archive probe refuses weakened TLS and non-canonical identity strings
+        run: node script/test-probe-tls.mjs
+
       - name: Run Forge fmt
         run: forge fmt --check
 

@@ -269,6 +269,13 @@ function resolveProvider(id) {
   // Over HTTPS a proxy only tunnels, and the endpoint's certificate authenticates who answered.
   const loopback = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(host);
   if (scheme !== 'https:' && !(scheme === 'http:' && loopback)) return { id, error: `${p.urlEnv} must be an https:// URL` };
+  // And HTTPS only proves who answered while certificate checking is intact. The sixth adversary pass had
+  // NODE_TLS_REJECT_UNAUTHORIZED=0, or NODE_EXTRA_CA_CERTS naming an attacker's CA, let one impostor behind a
+  // proxy answer for BOTH operators, and the run went VERIFIED_MATCH as two distinct operators.
+  const weakened = tlsWeakening();
+  if (scheme === 'https:' && weakened.length) {
+    return { id, error: `TLS certificate checking is weakened in this environment (${weakened.join(', ')}), so no certificate can prove which operator answers; unset it and re-run` };
+  }
   if (host !== p.host) return { id, error: `resolved host "${host}" is not the approved host "${p.host}" for provider "${id}"` };
   const refused = refuseUrlShape(url);
   if (refused) return { id, error: `${p.urlEnv} ${refused}` };
@@ -436,6 +443,20 @@ function proofLevel(a, b) {
     ? 'two-distinct-operators' : 'one-domain';
 }
 
+/// The environment settings that disable or widen Node's certificate checking, BY NAME (never their values).
+/// Node's bundled CA store with full verification is the only trust this probe's operator claim rests on.
+function tlsWeakening() {
+  const found = [];
+  const reject = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+  if (reject !== undefined && reject !== '1') found.push('NODE_TLS_REJECT_UNAUTHORIZED');
+  if (process.env.NODE_EXTRA_CA_CERTS) found.push('NODE_EXTRA_CA_CERTS');
+  const flags = [...process.execArgv, ...String(process.env.NODE_OPTIONS || '').split(/\s+/)];
+  for (const f of ['--use-openssl-ca', '--use-system-ca']) {
+    if (flags.some((x) => x === f || x.startsWith(f + '='))) found.push(f);
+  }
+  return [...new Set(found)];
+}
+
 // ---- identity, asserted before any answer is trusted ----
 async function identity(p, block) {
   const at = hex(block);
@@ -525,7 +546,10 @@ function abiString(w) {
   if (b.length < 64) return null;
   const offset = Number(BigInt('0x' + b.subarray(0, 32).toString('hex')));
   const length = Number(BigInt('0x' + b.subarray(32, 64).toString('hex')));
-  if (offset !== 32 || length > 256 || b.length < 64 + length) return null;
+  // EXACTLY what a contract returns: offset 32, length, the bytes, then ZERO padding to a 32-byte boundary,
+  // and nothing after. The sixth adversary pass had non-zero padding and a trailing extra word accepted.
+  if (offset !== 32 || length > 256 || b.length !== 64 + Math.ceil(length / 32) * 32) return null;
+  if (b.subarray(64 + length).some((x) => x !== 0)) return null;
   return b.subarray(64, 64 + length).toString('utf8');
 }
 

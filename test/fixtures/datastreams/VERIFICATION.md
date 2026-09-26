@@ -118,6 +118,13 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
   the network path, or a proxy Node is configured to use (`NODE_USE_ENV_PROXY` with `HTTP_PROXY`), can
   answer in the endpoint's place; the fifth adversary pass showed a proxy answering every call while the
   evidence recorded both operators as served. Over HTTPS a proxy only tunnels.
+- **HTTPS counts only while certificate checking is intact.** The sixth adversary pass put an impostor TLS
+  server behind a proxy and showed that `NODE_TLS_REJECT_UNAUTHORIZED=0`, or `NODE_EXTRA_CA_CERTS` naming the
+  impostor's CA, let it answer for BOTH operators and go `VERIFIED_MATCH`. An https provider is now refused
+  when any of these is set: `NODE_TLS_REJECT_UNAUTHORIZED` other than `1`, `NODE_EXTRA_CA_CERTS`, or
+  `--use-openssl-ca` / `--use-system-ca` in `NODE_OPTIONS` or the node flags. Only the names are printed.
+- **`typeAndVersion` must be encoded exactly as a contract returns it:** offset 32, length, the bytes, zero
+  padding to a 32-byte boundary and nothing after. Non-zero padding and a trailing extra word were accepted.
 - **Redirects are refused.** A provider answering 3xx would have had its calls served by whoever it
   pointed at, so the "two distinct operators" of the proof would not have been the ones answering.
 - **A failed identity read says which read and why.** Evidence records each unserved read's attempts as
@@ -163,7 +170,12 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
   the second pass fail while their control passes, and against `f424a9c` exactly the six cases added
   for the third pass fail, and against `c222b69` exactly the four cases added for the fourth pass fail. Against `8ef69b6`
   exactly the NUL and plain-HTTP cases fail (the honest run and the `oversized` case pass there, as they
-  should), and with the 4 MiB cap removed from an otherwise current probe only the `oversized` case fails.** The adversaries' own tests pass against this version. The `+`-in-a-path spelling is covered by construction, not by a separate case. The non-UTF-8 case is a regression case only: the windows of the escaped
+  should), and with the 4 MiB cap removed from an otherwise current probe only the `oversized` case fails.**
+- `script/test-probe-tls.mjs` (in CI; needs `openssl`) was written by the sixth adversary pass and adopted:
+  a throwaway CA, an impostor TLS server and a CONNECT proxy, with two controls (with checking intact the
+  proxy is used and the impostor cannot answer; the canonical encoding goes green) and five cases (the
+  three weakened-TLS settings, refused with the TLS message, and the two non-canonical encodings). Against
+  `0fb84df` exactly the five cases fail and both controls pass. The adversaries' own tests pass against this version. The `+`-in-a-path spelling is covered by construction, not by a separate case. The non-UTF-8 case is a regression case only: the windows of the escaped
   spelling already cover its ASCII part, so it does not isolate the bytewise decoder.
 - **Out of scope, stated so nobody relies on it:** a provider that deliberately transforms the key it
   holds beyond these encodings, for example by interleaving its bytes, cannot be caught by any string
