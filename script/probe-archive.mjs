@@ -294,6 +294,12 @@ const record = JSON.parse(readFileSync(join(HERE, 'providers.json'), 'utf8'));
 function resolveProvider(id) {
   const p = record.providers.find((x) => x.id === id);
   if (!p) return { id: 'unknown', error: 'the selected provider id is not listed in providers.json (it is not quoted here, in case it was a URL)' };
+  // A PROOF run uses keyless providers only, so the process that writes public evidence never holds a secret.
+  // Decided by Joshua on 2026-09-26 after twelve adversary passes on this file's redaction: QuickNode's and
+  // Monad Foundation's public endpoints are two distinct operators and need no key, so a credential adds
+  // nothing to the proof and only risk. Checked BEFORE the variable is read. Credentialed providers remain
+  // usable for diagnostic runs, where all the redaction below still applies.
+  if (AS_PROOF && p.credentialed) return { id, error: `provider "${id}" is credentialed; a proof run uses keyless providers only (use a diagnostic run without --as-proof for a credentialed endpoint)` };
   // Read ONCE and remembered, because the variable is deleted below: selecting the same provider for A and
   // B read it a second time and falsely reported it unset (twelfth adversary pass).
   if (!ENV_URLS.has(p.urlEnv)) ENV_URLS.set(p.urlEnv, process.env[p.urlEnv]);

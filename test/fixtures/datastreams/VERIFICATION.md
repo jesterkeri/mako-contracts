@@ -180,6 +180,12 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
     bytes, and SIGINT/SIGTERM/SIGHUP flush and then re-raise the same signal, so the process still dies by
     it. `script/test-probe-wrapper-edges.mjs` (in CI), from this pass: a control and five cases; against
     `b6091a5` all five fail.
+- **Decision, 2026-09-26 (Joshua): a PROOF run never holds a secret.** After twelve adversary passes on
+  the redaction, each finding something real but increasingly obscure, the root was removed instead: with
+  `--as-proof` the probe refuses any provider marked `credentialed` in `providers.json`, before reading its
+  variable. The proof pair is QuickNode's and Monad Foundation's public endpoints: two distinct operators,
+  no key, `VERIFIED_MATCH` on 2026-09-26. Credentialed endpoints (Alchemy) remain usable for diagnostic
+  runs, where all the redaction above still applies. The redaction suite gained a case for the refusal.
 - **Stated limit:** debugging and profiling options that write process memory to FILES (for example
   `--heapsnapshot-signal`) can contain the URLs held in memory. They are not output or evidence, but such
   files must never be committed; only the probe's own `evidence/` directory is ever added, by path.

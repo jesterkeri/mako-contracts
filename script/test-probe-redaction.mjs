@@ -201,8 +201,8 @@ const RUN_BUDGET_MS = 120_000;
 async function runProbe(dir, env) {
   const started = Date.now();
   const r = await new Promise((resolve) => {
-    const child = spawn('node', [join(dir, 'script/probe-archive.mjs')], {
-      env: { ...process.env, MAKO_PROVIDER_A: 'mock-a', MAKO_PROVIDER_B: 'mock-b', ...env },
+    const child = spawn('node', [join(dir, 'script/probe-archive.mjs'), ...(env.__ARGS || [])], {
+      env: { ...process.env, MAKO_PROVIDER_A: 'mock-a', MAKO_PROVIDER_B: 'mock-b', ...Object.fromEntries(Object.entries(env).filter(([k]) => k !== '__ARGS')) },
     });
     const kill = setTimeout(() => child.kill('SIGKILL'), RUN_BUDGET_MS);
     let stdout = '', stderr = '';
@@ -458,6 +458,13 @@ const scenarios = [
     opts: { reintroduceBug: 'partial' },
     env: both,
     check: (r) => r.code === 5 && r.resultText === null && clean(r),
+  },
+  {
+    // Decided 2026-09-26: a proof run never holds a secret. Both mock providers are credentialed here.
+    name: 'PROOF: a proof run refuses credentialed providers before reading them, and nothing leaks',
+    opts: {},
+    env: { ...both, __ARGS: ['--as-proof'] },
+    check: (r) => refusedAtConfig(r) && r.out.includes('a proof run uses keyless providers only'),
   },
   {
     name: 'CONFIG: a URL with user:password credentials is refused, and neither is printed',
