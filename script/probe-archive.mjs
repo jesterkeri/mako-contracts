@@ -34,6 +34,11 @@ import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// A diagnostic report (e.g. NODE_OPTIONS=--report-on-signal, fired by a CI job cancel) is written from native
+// code and would print the whole environment, RPC URLs included; the eleventh adversary pass showed exactly
+// that. Excluded here, first, and the URL variables are also deleted from the environment once read.
+if (process.report) process.report.excludeEnv = true;
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, '..');
 const AS_PROOF = process.argv.includes('--as-proof');
@@ -298,6 +303,9 @@ function resolveProvider(id) {
   // secret is kept out of the object entirely, and `writeEvidence` refuses to write anything containing
   // any secret form of a configured URL (see `secretFragments`) as a last line of defence.
   URLS.set(id, url);
+  // Out of the environment as soon as it is held privately: nothing that dumps the environment later (a
+  // diagnostic report, a child process, a crash handler) can then see it.
+  delete process.env[p.urlEnv];
   return { id, host, operator: p.operator, credentialed: p.credentialed, endpointConfigSha256: sha256(`${id}|${host}`) };
 }
 
@@ -408,36 +416,67 @@ function secretFragments() {
   return [...out].filter(Boolean).sort((x, y) => y.length - x.length);
 }
 
-const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-/// Redacts every secret form from a string, case-insensitively (hex can come back in either case). Used
-/// on ALL console output, so a provider string that slips through some future code path still cannot put
-/// a credential in a log. It is the stdout counterpart of `writeEvidence`'s refusal. A single alternation,
-/// longest first, so overlapping windows leave no run of WINDOW credential characters behind.
-let scrubCache = { key: null, re: null };
-function scrub(text) {
+// ---- scrubbing: no regex built from secrets, bytes not text, whole lines ----
+//
+// The eleventh adversary pass showed V8's --trace-regexp-parser / --print-regexp-bytecode / --print-regexp-code
+// printing the SOURCE of the scrub regex, which was built from every credential window. So no regex is built
+// from secret material at all: fragments are found with plain byte search. Matching is ASCII
+// case-insensitive, done on bytes, so a write's encoding (hex, latin1...) and multi-byte characters pass
+// through byte-for-byte, which the old text-level wrapper broke.
+const asciiLower = (b) => { const o = Buffer.from(b); for (let i = 0; i < o.length; i++) if (o[i] >= 65 && o[i] <= 90) o[i] += 32; return o; };
+let fragCache = { key: null, frags: [] };
+function secretFragmentBytes() {
   const key = [...URLS.values()].join('\n');
-  if (scrubCache.key !== key) {
-    const frags = secretFragments();
-    scrubCache = { key, re: frags.length ? new RegExp(frags.map(escapeRe).join('|'), 'gi') : null };
+  if (fragCache.key !== key) {
+    fragCache = { key, frags: [...new Set(secretFragments().map((f) => asciiLower(Buffer.from(f, 'utf8')).toString('latin1')))].map((f) => Buffer.from(f, 'latin1')) };
   }
-  return scrubCache.re ? String(text).replace(scrubCache.re, '[redacted]') : String(text);
+  return fragCache.frags;
 }
+const REDACTED = Buffer.from('[redacted]');
+function scrubBytes(buf) {
+  const frags = secretFragmentBytes();
+  if (!frags.length || !buf.length) return buf;
+  const lower = asciiLower(buf);
+  const mark = new Uint8Array(buf.length);
+  let any = false;
+  for (const f of frags) {
+    for (let i = lower.indexOf(f); i !== -1; i = lower.indexOf(f, i + 1)) { mark.fill(1, i, i + f.length); any = true; }
+  }
+  if (!any) return buf;
+  const out = [];
+  for (let i = 0; i < buf.length;) {
+    if (mark[i]) { while (i < buf.length && mark[i]) i++; out.push(REDACTED); }
+    else { let j = i; while (j < buf.length && !mark[j]) j++; out.push(buf.subarray(i, j)); i = j; }
+  }
+  return Buffer.concat(out);
+}
+function scrub(text) { return scrubBytes(Buffer.from(String(text), 'utf8')).toString('utf8'); }
+
 {
   // Scrubbed at the STREAM, not at console: the tenth adversary pass showed NODE_DEBUG=fetch making Node's
-  // bundled undici print every request URL, credential included, through util.debuglog straight to
-  // process.stderr, never touching a console wrapper. Everything JavaScript in this process writes to stdout
-  // or stderr passes here. (Native debug output, NODE_DEBUG_NATIVE, writes to the file descriptor directly
-  // and cannot be scrubbed from JavaScript, so resolveProvider refuses to run with it set.)
+  // bundled undici print every request URL through util.debuglog straight to process.stderr. Everything
+  // JavaScript in this process writes to stdout or stderr passes here, as BYTES in the write's own
+  // encoding, held until a newline so a credential cannot be split across two writes and escape the
+  // search. Pending bytes are flushed (scrubbed) on exit, and at 64 KiB. (NODE_DEBUG_NATIVE writes from native
+  // code and cannot be scrubbed from JavaScript, so resolveProvider refuses to run with it set.)
+  const MAX_PENDING = 64 * 1024;
   for (const stream of [process.stdout, process.stderr]) {
     const write = stream.write.bind(stream);
+    let pending = Buffer.alloc(0);
     stream.write = (chunk, encoding, cb) => {
       const done = typeof encoding === 'function' ? encoding : cb;
-      if (typeof chunk === 'string' || chunk instanceof Uint8Array) {
-        return write(scrub(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8')), done);
-      }
-      return write(chunk, encoding, cb);
+      let buf;
+      if (typeof chunk === 'string') buf = Buffer.from(chunk, typeof encoding === 'string' ? encoding : 'utf8');
+      else if (chunk instanceof Uint8Array) buf = Buffer.from(chunk);
+      else return write(chunk, encoding, cb);
+      pending = pending.length ? Buffer.concat([pending, buf]) : buf;
+      const cut = pending.length > MAX_PENDING ? pending.length : pending.lastIndexOf(0x0a) + 1;
+      if (cut === 0) { if (done) process.nextTick(done); return true; }
+      const ready = pending.subarray(0, cut);
+      pending = pending.subarray(cut);
+      return write(scrubBytes(ready), done);
     };
+    process.on('exit', () => { if (pending.length) { const rest = pending; pending = Buffer.alloc(0); write(scrubBytes(rest)); } });
   }
   const err = console.error.bind(console);
   // An uncaught error's message can quote provider data too. Print it scrubbed, then fail.

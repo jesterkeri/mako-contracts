@@ -148,6 +148,24 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
   which JavaScript cannot scrub, so the probe refuses to run with it set. `script/test-probe-debuglog.mjs`
   (in CI), from the tenth pass plus the native case: a control and five cases; against `10f8323` all five
   fail.
+- **Native output routes are closed at their cause, not by flag lists (eleventh adversary pass).**
+  A diagnostic report (`NODE_OPTIONS=--report-on-signal`, triggered by a signal such as a CI job cancel) is
+  written from native code and printed every environment variable, RPC URLs included. Now
+  `process.report.excludeEnv` is set before anything else runs, and each `MAKO_RPC_*` variable is deleted
+  from the environment the moment the probe has read it. And V8's `--trace-regexp-parser`,
+  `--print-regexp-bytecode` and `--print-regexp-code` printed the scrub regex's source, which was built from
+  every credential window; so no regex is built from secret material any more. Fragments are found by
+  plain ASCII-case-insensitive byte search.
+- **The output wrapper scrubs bytes, whole lines at a time.** A write is converted to bytes in its own
+  encoding and held until a newline (or 64 KiB, or exit), so a credential split across two writes is still
+  found and every byte passes through otherwise unchanged; the text-level wrapper had dropped the
+  encoding of string writes and split multi-byte characters.
+- `script/test-probe-native-output.mjs` and `script/test-probe-stream-wrapper.mjs` (both in CI), from the
+  eleventh pass: two controls and five native-route cases, and a byte-identity check against an
+  unwrapped reference. Against `86e60a2` all five cases and the byte check fail.
+- **Stated limit:** debugging and profiling options that write process memory to FILES (for example
+  `--heapsnapshot-signal`) can contain the URLs held in memory. They are not output or evidence, but such
+  files must never be committed; only the probe's own `evidence/` directory is ever added, by path.
 - **A failed identity read says which read and why.** Evidence records each unserved read's attempts as
   categories and HTTP status. On 2026-09-26 a new key pasted with a trailing ` \` from an example
   command failed every call with 401, and the record said only "not served".

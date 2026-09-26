@@ -62,6 +62,12 @@ jobs:
       - name: Archive probe output is scrubbed even when Node's own debug logging prints request URLs
         run: node script/test-probe-debuglog.mjs
 
+      - name: Archive probe leaks nothing through native output (diagnostic reports, V8 regexp tracing)
+        run: node script/test-probe-native-output.mjs
+
+      - name: Archive probe's output wrapper passes bytes through unchanged
+        run: node script/test-probe-stream-wrapper.mjs
+
       - name: Run Forge fmt
         run: forge fmt --check
 
