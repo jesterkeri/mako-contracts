@@ -120,8 +120,12 @@ function encodeVerifyCall(fullReport) {
 const RPC_TIMEOUT_MS = Math.min(Math.max(Number(process.env.MAKO_PROBE_RPC_TIMEOUT_MS) || 20_000, 500), 60_000);
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024; // a Monad block's hash list and the 7 KB verifier code fit many times over
 class Oversized extends Error {}
+class TrustChanged extends Error {}
 
 async function rpc(url, method, params) {
+  // Trust is re-checked before EVERY https request, not only at startup: the eighth adversary pass had a
+  // preload change the trust store one second after the startup check, and the impostor then answered.
+  if (url.startsWith('https:') && tlsWeakening().length) throw new TrustChanged();
   const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
   // The deadline is enforced by RACING every await against it, not by trusting fetch to honour its signal:
   // against a dripping provider (fourth adversary pass), undici left a pending body read unresolved after
@@ -171,7 +175,8 @@ async function rpcWithRetry(url, method, params) {
     // A transport error's message can carry the URL (and its cause can), so only a fixed category is kept.
     // Only the error's TYPE is used, never its message.
     catch (e) {
-      const category = e instanceof Oversized ? 'oversized' : e?.name === 'TimeoutError' || e?.name === 'AbortError' ? 'timeout' : 'transport';
+      const category = e instanceof Oversized ? 'oversized' : e instanceof TrustChanged ? 'trust-store-changed'
+        : e?.name === 'TimeoutError' || e?.name === 'AbortError' ? 'timeout' : 'transport';
       attempts.push({ attempt: i, category });
       if (i < RETRY_ATTEMPTS) { await sleep(delay); delay = Math.min(delay * 2, RETRY_CAP_MS); }
       continue;
@@ -455,9 +460,13 @@ function proofLevel(a, b) {
 /// not enumerable, which is still not equal). NODE_TLS_REJECT_UNAUTHORIZED=0 turns checking off without
 /// touching the store, so it is checked by its exact value, the one Node honours.
 ///
+/// It is checked when each provider is resolved AND before every https request.
+///
 /// Out of scope, stated rather than implied: code the operator chose to run inside this process (a
-/// --require or --import preload) can replace fetch itself or write any evidence it likes; no check made
-/// from inside the same process can bound that.
+/// --require or --import preload) can replace fetch itself, change the trust store between a check and the
+/// connection it guards, or write any evidence it likes; no check made from inside the same process can
+/// bound that. The checks close every CONFIGURATION route to widened trust and any in-process change made
+/// before a request is sent; they do not claim to defeat code execution.
 function tlsWeakening() {
   const found = [];
   if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') found.push('NODE_TLS_REJECT_UNAUTHORIZED=0 disables certificate checking');

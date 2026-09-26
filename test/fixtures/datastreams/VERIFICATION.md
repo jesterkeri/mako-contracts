@@ -127,10 +127,13 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
   trust store Node actually uses is EXACTLY its bundled CA set (`tls.getCACertificates('default')` equals
   `'bundled'`), and unless `NODE_TLS_REJECT_UNAUTHORIZED` is not `0`, the only value Node honours. Measured
   on Node 22.23.2: 145 bundled; `NODE_EXTRA_CA_CERTS` gives 146, `NODE_USE_SYSTEM_CA` 509, and
-  `--use-openssl-ca` 0 (not enumerable, still unequal). Stated limit: code the operator chooses to run
-  inside the process (a `--require`/`--import` preload) can replace `fetch` or write any evidence it
-  likes, and no in-process check bounds that; the preload tested here is caught only because it changes
-  the trust store.
+  `--use-openssl-ca` 0 (not enumerable, still unequal). The check runs when each provider is resolved
+  AND before every https request: the eighth adversary pass had a preload change the store one second
+  after the startup check, and the impostor then answered. Stated limit: code the operator chooses to run
+  inside the process (a `--require`/`--import` preload) can replace `fetch`, change the store between a
+  check and the connection it guards, or write any evidence it likes; no in-process check bounds that.
+  The checks close every configuration route to widened trust and any in-process change made before a
+  request is sent. They do not claim to defeat code execution.
 - **`typeAndVersion` must be encoded exactly as a contract returns it:** offset 32, length, the bytes, zero
   padding to a 32-byte boundary and nothing after. Non-zero padding and a trailing extra word were accepted.
 - **Redirects are refused.** A provider answering 3xx would have had its calls served by whoever it
@@ -187,7 +190,13 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
 - `script/test-probe-tls-bypass.mjs` (in CI; needs `openssl`) was written by the seventh adversary pass and
   adopted: a control plus the six bypasses, each with a PRECONDITION showing, outside the probe, that the
   setting really does make Node trust the impostor. A pass means the impostor answered nothing and the
-  run is not green. Against `e06aad4` all six fail and the control passes; against this version all pass. The adversaries' own tests pass against this version. The `+`-in-a-path spelling is covered by construction, not by a separate case. The non-UTF-8 case is a regression case only: the windows of the escaped
+  run is not green. Against `e06aad4` all six fail and the control passes; against this version all pass.
+- `script/test-probe-tls-deferred.mjs` (in CI; needs `openssl`), from the eighth adversary pass, adopted with
+  one added case: a control; a `--require` and an `--import` preload that widen the store one second after
+  start (preconditions: equal to bundled at load time, impostor trusted later); and a SWAP preload giving a
+  store of the bundled size with one certificate replaced (precondition: same count, different members).
+  Against `7f679ce` exactly the two delayed cases fail; with the check weakened to compare counts only,
+  exactly the swap case fails. The adversaries' own tests pass against this version. The `+`-in-a-path spelling is covered by construction, not by a separate case. The non-UTF-8 case is a regression case only: the windows of the escaped
   spelling already cover its ASCII part, so it does not isolate the bytewise decoder.
 - **Out of scope, stated so nobody relies on it:** a provider that deliberately transforms the key it
   holds beyond these encodings, for example by interleaving its bytes, cannot be caught by any string
