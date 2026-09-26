@@ -48,6 +48,16 @@ const abiString = (str) => {
     + hex.padEnd(Math.ceil(hex.length / 64) * 64, '0');
 };
 const hexOf = (str) => Buffer.from(str).toString('hex');
+// For the HONEST mode: the verifier's real runtime code at block 62922075 (fetched from two operators,
+// byte-identical; sha256 is the probe's pin and keccak256 is SPEC.md:78's) and the real verify return
+// from the pinned B1 record. With these a mock can pass every identity check and the run can go green.
+const VERIFIER_CODE = readFileSync(join(REPO, 'test/fixtures/datastreams/verifier-runtime-62922075.hex'), 'utf8').trim();
+if (createHash('sha256').update(Buffer.from(VERIFIER_CODE.slice(2), 'hex')).digest('hex') !== '246be742ffcc522f72309f1f42c77817af4d6f823969ce9e5763f2a9327ca231') {
+  throw new Error('vendored verifier code does not match the pinned sha256');
+}
+const PINNED_B1 = JSON.parse(readFileSync(join(REPO, 'test/fixtures/datastreams/evidence/archive-probe-2026-09-24T21-28-43-466Z/RESULT.json'), 'utf8'));
+const VERIFY_RETURN = PINNED_B1.providers['monad-public'].rawResult;
+const ZERO_WORD = '0x' + '00'.repeat(32);
 const server = createServer((req, res) => {
   let body = '';
   req.on('data', (c) => (body += c));
@@ -82,6 +92,14 @@ const server = createServer((req, res) => {
       return ok('0x' + bytes.toString('hex'));
     }
     if (isVerify && MODE === 'ground-hash') return ok(GROUND_RESULT);
+    if (MODE === 'honest') {
+      if (method === 'eth_chainId') return ok('0x279f');
+      if (method === 'eth_getCode') return ok(VERIFIER_CODE);
+      if (method === 'eth_getBlockByNumber') return ok({ number: '0x3c01d5b', hash: '0x73f54743b7db644c8f010e74f422107337b586b59fed5a91916f98b384a722d6', timestamp: '0x6aaa0c48' });
+      if (data.startsWith('0x38416b5b') || data.startsWith('0x94ba2846')) return ok(ZERO_WORD);
+      if (data.startsWith('0x181f5a77')) return ok(abiString('VerifierProxy 2.0.0'));
+      if (isVerify) return ok(VERIFY_RETURN);
+    }
     // Third adversary pass: inputs that crashed the run (exit 1, no evidence) rather than leaked.
     // Fourth adversary pass: provider A (identified by its credential) stalls or redirects.
     const isA = pathAtom === SENTINELS[0];
@@ -92,6 +110,10 @@ const server = createServer((req, res) => {
       const t = setInterval(() => res.write(' '), 200);
       res.on('close', () => clearInterval(t));
       return;
+    }
+    if (MODE === 'nul-tv' && isA && data.startsWith('0x181f5a77')) {
+      // ~2 MB of NULs then one other byte: a trailing-NUL regex over this ran for ~18 minutes.
+      return ok('0x' + '00'.repeat(64) + '00'.repeat(2_000_000) + '58');
     }
     if (MODE === 'unauthorized' && isA) {
       // Every call from provider A rejected as unauthenticated, as a mistyped key is (2026-09-26).
@@ -146,6 +168,7 @@ function tree({ reintroduceBug = false } = {}) {
     providers: [
       { id: 'mock-a', host: HOST, urlEnv: 'MAKO_RPC_MOCK_A', operator: 'Mock Operator A', credentialed: true },
       { id: 'mock-b', host: HOST, urlEnv: 'MAKO_RPC_MOCK_B', operator: 'Mock Operator B', credentialed: true },
+      { id: 'mock-remote', host: 'rpc.example.invalid', urlEnv: 'MAKO_RPC_MOCK_REMOTE', operator: 'Mock Remote', credentialed: true },
     ],
   }));
   if (reintroduceBug) {
@@ -176,6 +199,7 @@ function tree({ reintroduceBug = false } = {}) {
 // hanging this test and the CI job with it.
 const RUN_BUDGET_MS = 120_000;
 async function runProbe(dir, env) {
+  const started = Date.now();
   const r = await new Promise((resolve) => {
     const child = spawn('node', [join(dir, 'script/probe-archive.mjs')], {
       env: { ...process.env, MAKO_PROVIDER_A: 'mock-a', MAKO_PROVIDER_B: 'mock-b', ...env },
@@ -190,7 +214,7 @@ async function runProbe(dir, env) {
   const runs = existsSync(evDir) ? readdirSync(evDir) : [];
   const resultText = runs.length && existsSync(join(evDir, runs[0], 'RESULT.json'))
     ? readFileSync(join(evDir, runs[0], 'RESULT.json'), 'utf8') : null;
-  return { code: r.status, out: (r.stdout || '') + (r.stderr || ''), resultText };
+  return { code: r.status, out: (r.stdout || '') + (r.stderr || ''), resultText, ms: Date.now() - started };
 }
 
 // Plain AND hex-encoded, since a provider can return bytes that decode to the credential.
@@ -237,7 +261,7 @@ const scenarios = [
     name: 'full run through both credentialed providers',
     opts: {},
     env: { MAKO_RPC_MOCK_A: urlA, MAKO_RPC_MOCK_B: urlB },
-    check: (r) => r.resultText !== null && leaks(r.resultText).length === 0 && leaks(r.out).length === 0,
+    check: (r) => written(r),
   },
   {
     name: 'early failure path: one provider unresolved, evidence still written',
@@ -250,14 +274,14 @@ const scenarios = [
     mode: 'echo-revert',
     opts: {},
     env: { MAKO_RPC_MOCK_A: urlA, MAKO_RPC_MOCK_B: urlB },
-    check: (r) => r.resultText !== null && leaks(r.resultText).length === 0 && leaks(r.out).length === 0,
+    check: (r) => written(r),
   },
   {
     name: 'HOSTILE provider echoes the credentialed URL in its typeAndVersion string',
     mode: 'echo-tv',
     opts: {},
     env: { MAKO_RPC_MOCK_A: urlA, MAKO_RPC_MOCK_B: urlB },
-    check: (r) => r.resultText !== null && leaks(r.resultText).length === 0 && leaks(r.out).length === 0,
+    check: (r) => written(r),
   },
   // ---- round 5: the credential on its own ----
   { name: 'ATOM: path credential alone in a JSON-RPC error message', mode: 'atom-error-path', opts: {}, env: both, check: (r) => written(r) },
@@ -361,7 +385,38 @@ const scenarios = [
     env: { ...both, MAKO_PROVIDER_A: SENTINELS[10] },
     check: (r) => refusedAtConfig(r),
   },
-  { name: 'ROBUST: a 12 MB eth_getCode result is refused as oversized and classified, not a crash', mode: 'huge-code', opts: {}, env: both, check: (r) => r.code === 3 && written(r) },
+  {
+    name: 'ROBUST: a 12 MB eth_getCode result is refused as oversized and classified, not a crash',
+    mode: 'huge-code',
+    opts: {},
+    env: both,
+    check: (r) => {
+      if (!(r.code === 3 && written(r))) return false;
+      const a = JSON.parse(r.resultText).providers['mock-a'].identity.unserved?.eth_getCode || [];
+      return a.length > 0 && a.every((x) => x.category === 'oversized');
+    },
+  },
+  // ---- fifth adversary pass ----
+  {
+    name: 'BOUND: a typeAndVersion of ~2 MB of NULs plus one byte is classified in seconds, not minutes',
+    mode: 'nul-tv',
+    opts: {},
+    env: both,
+    check: (r) => r.code === 3 && written(r) && r.ms < 30_000,
+  },
+  {
+    name: 'OPERATOR: a plain-HTTP endpoint that is not loopback is refused (a proxy or the path could answer)',
+    opts: {},
+    env: { ...both, MAKO_PROVIDER_A: 'mock-remote', MAKO_RPC_MOCK_REMOTE: `http://rpc.example.invalid/v2/${SENTINELS[0]}` },
+    check: (r) => refusedAtConfig(r) && r.out.includes('must be an https:// URL'),
+  },
+  {
+    name: 'HONEST: two honest providers with the real verifier code and return give VERIFIED_MATCH, and the run exits by itself',
+    mode: 'honest',
+    opts: {},
+    env: both,
+    check: (r) => r.code === 0 && r.ms < 30_000 && r.resultText !== null && JSON.parse(r.resultText).status === 'VERIFIED_MATCH' && clean(r),
+  },
   // ---- fourth adversary pass ----
   {
     name: 'ROBUST: a provider dripping one byte at a time is timed out and classified, not waited on forever',

@@ -262,7 +262,13 @@ function resolveProvider(id) {
   if (!p) return { id: 'unknown', error: 'the selected provider id is not listed in providers.json (it is not quoted here, in case it was a URL)' };
   const url = process.env[p.urlEnv];
   if (!url) return { id, error: `environment variable ${p.urlEnv} is not set` };
-  let host; try { host = new URL(url).host; } catch { return { id, error: `${p.urlEnv} is not a URL` }; }
+  let host, scheme; try { ({ host, protocol: scheme } = new URL(url)); } catch { return { id, error: `${p.urlEnv} is not a URL` }; }
+  // HTTPS only (plain HTTP to a loopback test server excepted). Over plain HTTP, anything on the network
+  // path, or a proxy Node is configured to use (NODE_USE_ENV_PROXY with HTTP_PROXY), can answer in the
+  // endpoint's place and the evidence would name an operator that never answered (fourth adversary pass).
+  // Over HTTPS a proxy only tunnels, and the endpoint's certificate authenticates who answered.
+  const loopback = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(host);
+  if (scheme !== 'https:' && !(scheme === 'http:' && loopback)) return { id, error: `${p.urlEnv} must be an https:// URL` };
   if (host !== p.host) return { id, error: `resolved host "${host}" is not the approved host "${p.host}" for provider "${id}"` };
   const refused = refuseUrlShape(url);
   if (refused) return { id, error: `${p.urlEnv} ${refused}` };
@@ -507,10 +513,20 @@ function code32(w) {
   return typeof w === 'string' && /^0x0{24}[0-9a-fA-F]{40}$/.test(w) ? ('0x' + w.slice(-40)).toLowerCase() : null;
 }
 /// The string an ABI `string` return carries, or null. Only compared, never recorded unless it matches.
+//
+// Decoded STRICTLY from the ABI head (offset 32, a length word, then that many bytes), with no regex on
+// provider bytes: the fourth adversary pass showed `.replace(/\0+$/, '')` over ~2 MB of NULs followed by
+// one other byte running in quadratic time, about 18 minutes per provider, which no request deadline can
+// interrupt because it runs after the response has arrived. Anything longer than 256 bytes cannot be the
+// pinned string, so it is not decoded at all.
 function abiString(w) {
-  if (!isHex(w)) return null;
+  if (!isHex(w) || w.length > 2 + 2 * (64 + 256 + 32)) return null;
   const b = Buffer.from(w.slice(2), 'hex');
-  return b.length > 64 ? b.subarray(64).toString('utf8').replace(/\0+$/, '') : null;
+  if (b.length < 64) return null;
+  const offset = Number(BigInt('0x' + b.subarray(0, 32).toString('hex')));
+  const length = Number(BigInt('0x' + b.subarray(32, 64).toString('hex')));
+  if (offset !== 32 || length > 256 || b.length < 64 + length) return null;
+  return b.subarray(64, 64 + length).toString('utf8');
 }
 
 // ---- main ----

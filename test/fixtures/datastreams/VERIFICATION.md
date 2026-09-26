@@ -110,6 +110,14 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
   retried, categorised attempt (`timeout`, `oversized`, `transport`). The deadline is enforced by racing
   every await against it: Node 22.23's `fetch` was shown, outside the probe, to leave a pending body read
   unresolved after `abort()` on a fourth retry, so trusting the signal alone still hung.
+- **No provider value is run through a regex that can be made slow.** `typeAndVersion` is decoded strictly
+  from its ABI head (offset 32, a length of at most 256, then those bytes). The fifth adversary pass showed
+  the previous trailing-NUL trim taking quadratic time on ~2 MB of NULs plus one byte, about 18 minutes per
+  provider, which no request deadline can interrupt because it runs after the response has arrived.
+- **Endpoints must be `https://`** (plain HTTP only to a loopback test server). Over plain HTTP, anything on
+  the network path, or a proxy Node is configured to use (`NODE_USE_ENV_PROXY` with `HTTP_PROXY`), can
+  answer in the endpoint's place; the fifth adversary pass showed a proxy answering every call while the
+  evidence recorded both operators as served. Over HTTPS a proxy only tunnels.
 - **Redirects are refused.** A provider answering 3xx would have had its calls served by whoever it
   pointed at, so the "two distinct operators" of the proof would not have been the ones answering.
 - **A failed identity read says which read and why.** Evidence records each unserved read's attempts as
@@ -118,7 +126,7 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
 - **A hostile provider cannot crash the run instead of being classified.** Hex is checked without a
   repeated capture group, which overflowed the regex stack on a multi-megabyte value, and provider values
   are turned into text for hashing with `JSON.stringify`, never through a provider-chosen `toString`.
-- `test-probe-redaction.mjs` has 40 scenarios:
+- `test-probe-redaction.mjs` has 43 scenarios:
   - each credential alone in error text and in base64;
   - hex as a malformed result and as a well-formed unshared result;
   - truncated into an address word, as the block hash, and echoed percent-decoded;
@@ -136,7 +144,14 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
     that are objects with a non-callable `toString`);
   - from the fourth adversary pass: a provider dripping one byte at a time, a provider redirecting every
     call to the other endpoint, a provider rejecting every call with 401, and a guard case writing 10
-    credential bytes with every byte percent-escaped.
+    credential bytes with every byte percent-escaped;
+  - from the fifth adversary pass: the ~2 MB NUL `typeAndVersion` (must classify in under 30 s), a
+    plain-HTTP non-loopback endpoint (must be refused), the 12 MB case now required to be refused
+    specifically as `oversized`, and an **honest** run: two mock providers serving the verifier's real
+    runtime code and the real pinned verify return must reach `VERIFIED_MATCH` and exit on their own. The
+    code is vendored as `verifier-runtime-62922075.hex`: `eth_getCode` at block 62922075 from QuickNode and
+    Monad Foundation on 2026-09-26, byte-identical, 7,009 bytes, sha256 `246be742…a231` (the probe's
+    pin) and keccak256 `0x4bd86e89…c022b` (`SPEC.md:78`); the test refuses to run if the sha256 differs.
 
   A written-evidence scenario also requires the HONEST provider to have been read and identified. Without
   that, a transport bug introduced while fixing the hang made every request throw, and 35 of 40
@@ -146,7 +161,9 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
   A leak means any 10-character window of a credential, plain or hex. **Against `8f4e3b0` (the first
   round-5 fix) 7 of the 25 then present failed, and against `153fa0c` exactly the four cases added for
   the second pass fail while their control passes, and against `f424a9c` exactly the six cases added
-  for the third pass fail, and against `c222b69` exactly the four cases added for the fourth pass fail.** The adversaries' own tests pass against this version. The `+`-in-a-path spelling is covered by construction, not by a separate case. The non-UTF-8 case is a regression case only: the windows of the escaped
+  for the third pass fail, and against `c222b69` exactly the four cases added for the fourth pass fail. Against `8ef69b6`
+  exactly the NUL and plain-HTTP cases fail (the honest run and the `oversized` case pass there, as they
+  should), and with the 4 MiB cap removed from an otherwise current probe only the `oversized` case fails.** The adversaries' own tests pass against this version. The `+`-in-a-path spelling is covered by construction, not by a separate case. The non-UTF-8 case is a regression case only: the windows of the escaped
   spelling already cover its ASCII part, so it does not isolate the bytewise decoder.
 - **Out of scope, stated so nobody relies on it:** a provider that deliberately transforms the key it
   holds beyond these encodings, for example by interleaving its bytes, cannot be caught by any string
