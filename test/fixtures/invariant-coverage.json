@@ -1,0 +1,71 @@
+{
+  "$comment": [
+    "T1.4: which evidence proves each CONTRACT-ENFORCED invariant of mako-design/blueprint/INVARIANTS.md (r8).",
+    "script/check-invariants.mjs, in CI, fails unless every invariant below is listed, every named test exists",
+    "as a function in test/*.sol, every corpus row exists in test/fixtures/rule-cases/CASES.json, every script",
+    "exists, and every deferral names its owner task. It proves the MAP is true; that each test can FAIL for its",
+    "invariant is proved by script/mutate-solidity.mjs and the mutation notes in VERIFICATION.md.",
+    "The courier-side invariants (N15, N20, N21, N24) are proved outside this contract repository (T2.0, T0.1b)."
+  ],
+  "source": "mako-design/blueprint/INVARIANTS.md, revision r8 (2026-09-18), table 'Enforced by the contract'",
+  "expected": ["N1", "N1b", "N1c", "N2", "N3", "N5", "N6", "N7", "N8", "N9", "N10", "N11", "N12", "N13", "N14", "N16", "N17", "N18", "N19", "N22", "N25", "N26", "N27"],
+  "invariants": {
+    "N1": {
+      "tests": ["test_LibraryAgreesWithTheCorpusOnEveryMockRow", "test_CorpusCoversEveryNamedN1Test", "test_NoOutcomeParameter", "test_VerifierAddressIsPinned",
+        "test_AcceptsWindowEndingAtBoundary", "test_RejectsOneSecondEarlyAndLate", "test_TamperedReportIsRejectedByTheRealVerifier", "test_ForkIsTheRealVerifierAtThePinnedBlock",
+        "testFuzz_ArbitraryBytesCannotSettle", "test_SwappedAnchorAndCloseReportsAreRejected"],
+      "corpusRows": ["accept-real-widened-window", "reject-verifier-reverts", "reject-v8-shaped-return", "reject-v11-shaped-return", "reject-short-return-287",
+        "reject-long-return-289", "reject-other-feed", "reject-one-second-early", "reject-one-second-late", "reject-validfrom-after-observation",
+        "reject-decodes-verified-not-input"],
+      "note": "INVARIANTS.md's names test_RejectsReportTheVerifierRejects .. test_DecodesVerifiedBytesNotInput are corpus rows, run by test_LibraryAgreesWithTheCorpusOnEveryMockRow against the shipping library and by script/rule-reference.mjs independently. The fork tests skip offline and run with MAKO_FORK_RPC (Type B2)."
+    },
+    "N1b": { "tests": ["test_NoRoleCanForceRefundBeforeDeadline", "test_FinalizeRefundAfterDeadline", "test_TwoSidedRoundCannotRefundAsOneSided"] },
+    "N1c": {
+      "tests": ["test_RoundSettlesAtMostOnce", "test_ARefundedRoundCannotThenSettle", "test_LastSecondSettleWinsAndIsFinal", "test_FinalizeRefundOnATerminalRoundReverts"],
+      "scripts": ["script/check-surface.mjs"],
+      "note": "test_FirstValidSettlementWins is test_RoundSettlesAtMostOnce with test_LastSecondSettleWinsAndIsFinal; test_NoOwnerOverride is check-surface.mjs, which asserts the whole external ABI and so that no owner or setter exists."
+    },
+    "N2": { "tests": ["test_EntryRevertsAtEntryClose", "test_BoundariesHoldAtPlusMinusOne"] },
+    "N3": { "tests": ["test_OneSidedRefundsWithoutPrice", "test_OneSidedRoundCannotSettle", "test_PendingSettlementExcludesOneSidedRounds"] },
+    "N5": { "tests": ["test_FinalizeRefundAfterDeadline", "test_StuckRoundsHoldCapacityUntilSomeoneRefundsThem"] },
+    "N6": { "tests": ["test_SeedLocked"] },
+    "N7": { "scripts": ["script/check-surface.mjs"], "note": "test_NoSetters is check-surface.mjs: the ABI equals an allowlist of six writers, none a setter." },
+    "N8": {
+      "tests": ["test_EnterIsNotReentrant", "test_SettleIsNotReentrant", "test_ClaimIsNotReentrant", "test_WithdrawTreasuryIsNotReentrant", "test_FeeOnTransferTokenReverts",
+        "test_OvershootingTokenReverts", "test_ShortOutboundTransferReverts"],
+      "note": "One reentrancy test per value-moving function: enter, settle, claim, withdrawTreasury. finalizeRefund moves no value (it only sets state; the money leaves through claim), so it carries no guard and needs no reentrancy test."
+    },
+    "N9": { "tests": ["test_TieRefunds", "test_OutcomeUpWhenCloseIsHigher", "test_OutcomeDownWhenCloseIsLower", "test_EqualPricesRefundAsTie"] },
+    "N10": { "scripts": ["script/check-surface.mjs"], "note": "test_NoPausePathOnSettlement is check-surface.mjs: no pause function or modifier exists on any path." },
+    "N11": {
+      "tests": ["test_LibraryAgreesWithTheCorpusOnEveryMockRow", "test_CorpusCoversEveryN11Clause", "test_MaximumIntegerSpreadRowIsPresentAndMustNotPanic", "test_FeeManagerCheckRunsBeforeVerify",
+        "test_ExpiryIsEnforcedByTheLibraryNotTheVerifier"],
+      "corpusRows": ["accept-at-expiry-boundary", "accept-spread-exactly-at-limit", "reject-fee-manager-present", "reject-price-zero", "reject-price-negative", "reject-price-int192-min",
+        "reject-bid-above-price", "reject-ask-below-price", "reject-spread-one-bps-over", "reject-spread-max-integer-must-not-panic", "reject-expired-by-one-second",
+        "reject-expired-at-uint32-max-boundary"]
+    },
+    "N12": { "tests": ["test_OneAddressOneSide", "test_TopUpOnTheSameSideAddsAndDoesNotDoubleCountTheEntrant"] },
+    "N13": { "tests": ["test_SettleAndRefundWindowsDisjoint", "test_LastSecondSettleWinsAndIsFinal"] },
+    "N14": { "tests": ["test_SettlementEmitsEvidence", "test_TieEmitsEvidenceWithoutClaimingToBeSettled", "test_TieEmitsItsSettlementEvidence"] },
+    "N16": { "deferred": { "owner": "T1.5", "reason": "a deploy-script assertion; no deploy script exists until T1.5 deploys to testnet" } },
+    "N17": {
+      "tests": ["testFuzz_ConservationSettled", "testFuzz_SettlementConservesTheTotal", "test_RemainderWaitsForTheLastWinner", "test_ConservationRefund", "test_ARefundChargesNoFees",
+        "testFuzz_CrossRoundSolvencyDrainsToZero"],
+      "note": "test_ConservationSettled is testFuzz_ConservationSettled; test_RemainderOnLastClaim is test_RemainderWaitsForTheLastWinner; test_ConservationRefund covers each refund reason (added at T1.4)."
+    },
+    "N18": {
+      "tests": ["test_LeadBoundsAreEnforcedAtTheBoundaryPlusMinusOne", "test_OnlyCreatorsMaySchedule", "test_OneNonTerminalRoundPerCreator", "test_GlobalActiveRoundCapIsEnforced",
+        "test_SettlingFreesBothTheGlobalAndTheCreatorSlot", "test_StartTimeMustFitAUint32ReportTimestamp"],
+      "note": "test_ScheduleBounds, test_OnlyInvitedCreators, test_OneOpenRoundPerCreator and test_GlobalActiveCap carry these names in the suite."
+    },
+    "N19": { "tests": ["test_FeesOnlyOnSettle", "test_ZeroStakeCreatorClaimsFee", "test_NoDoubleClaim", "test_TreasuryOnly", "test_RefundRecordsNoCreatorFee", "test_FeesFollowTheSpecFormula"] },
+    "N22": {
+      "tests": ["test_FeeOnTransferTokenReverts", "test_OvershootingTokenReverts", "test_FalseReturningTokenReverts", "test_RevertingTokenReverts", "test_MalformedReturnTokenReverts",
+        "test_NoReturnTokenIsAccepted", "test_StrayTransfersAreNeverCredited"],
+      "deferred": { "owner": "T1.5", "reason": "the deployed USDC address and code-hash assertion is a deploy-script check; no deploy script exists until T1.5" }
+    },
+    "N25": { "tests": ["test_AnchorSecondIsStartTime", "test_EntryRevertsAtEntryClose"] },
+    "N26": { "tests": ["testFuzz_AnyCallerSameOutcome", "testFuzz_ArbitraryBytesCannotSettle"] },
+    "N27": { "tests": ["test_StartTimeOnMinute"] }
+  }
+}

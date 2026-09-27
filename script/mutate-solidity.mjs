@@ -374,6 +374,26 @@ const MUTATIONS = [
   },
   {
     file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest',
+    name: 'rounds: a refund pays back 99% of the stake',
+    clause: 'N17 refund conservation',
+    from: `                stakePart = stake.amount;
+                _stakeClaimed[roundId][msg.sender] = true;`,
+    to: `                stakePart = (stake.amount * 99) / 100;
+                _stakeClaimed[roundId][msg.sender] = true;`,
+    note: 'Added at T1.4 with test_ConservationRefund, which kills it for every refund reason.',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest',
+    name: 'rounds: a refund pays the pool pro rata instead of the stake',
+    clause: 'N17 refund conservation',
+    from: `                stakePart = stake.amount;
+                _stakeClaimed[roundId][msg.sender] = true;`,
+    to: `                stakePart = (stake.amount * (r.upPool + r.downPool)) / (stake.side == Side.Up ? r.upPool : r.downPool) / 2;
+                _stakeClaimed[roundId][msg.sender] = true;`,
+    note: 'Added at T1.4 with test_ConservationRefund.',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest',
     name: 'rounds: pay the creator fee on a refunded round',
     clause: 'N19 fees only on SETTLED',
     from: 'if (r.status == Status.Settled && msg.sender == r.creator && !_creatorFeeClaimed[roundId]) {',

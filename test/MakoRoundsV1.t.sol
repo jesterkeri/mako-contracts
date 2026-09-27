@@ -890,6 +890,86 @@ contract MakoRoundsV1Test is Test {
         rounds.finalizeRefund(roundId);
     }
 
+    /// @notice N1b: no party can trigger a PRICE-DEPENDENT refund before `submitDeadline`. The contract has
+    /// no owner or other role, so "no party" means every address that has any relation to the round: its
+    /// creator, the treasury, each entrant, a stranger, and this test contract. For a two-sided round,
+    /// `finalizeRefund` refuses all of them at every moment from `entryCloseTime` to one second before
+    /// `submitDeadline`; OneSided is not available (both pools are funded) and NoPrice is not yet due.
+    function test_NoRoleCanForceRefundBeforeDeadline() public {
+        _twoSided();
+        address[6] memory callers = [creator, TREASURY, alice, bob, outsider, address(this)];
+        uint64[4] memory moments = [startTime - 60, startTime, closeTime, submitDeadline - 1];
+        for (uint256 t = 0; t < moments.length; t++) {
+            vm.warp(moments[t]);
+            for (uint256 c = 0; c < callers.length; c++) {
+                vm.prank(callers[c]);
+                vm.expectRevert(MakoRoundsV1.NotRefundableYet.selector);
+                rounds.finalizeRefund(roundId);
+            }
+        }
+        assertTrue(rounds.phaseOf(roundId) != MakoRoundsV1.Phase.Refunded, "still not refunded");
+    }
+
+    /// @notice N17, refund half: every refund returns EXACTLY each entrant's total stake, for each of the
+    /// three reasons, with no fee to anyone, and the contract ends holding nothing for the round. Entrants
+    /// top up on their side so a stake is a sum, not a single transfer.
+    function test_ConservationRefund() public {
+        for (uint256 reason = 0; reason < 3; reason++) {
+            uint256 snap = vm.snapshotState();
+            vm.warp(BASE);
+            vm.prank(alice);
+            rounds.enter(roundId, MakoRoundsV1.Side.Up, 10_000_000);
+            vm.prank(alice);
+            rounds.enter(roundId, MakoRoundsV1.Side.Up, 5_000_000);
+            vm.prank(creator);
+            rounds.enter(roundId, MakoRoundsV1.Side.Up, 7_000_000);
+            if (reason != 0) {
+                vm.prank(bob);
+                rounds.enter(roundId, MakoRoundsV1.Side.Down, 30_000_000);
+            }
+
+            MakoRoundsV1.RefundReason expected;
+            if (reason == 0) {
+                vm.warp(startTime - 60);
+                rounds.finalizeRefund(roundId);
+                expected = MakoRoundsV1.RefundReason.OneSided;
+            } else if (reason == 1) {
+                _arm(_anchorBytes(), uint32(startTime), 100e18);
+                _arm(_closeBytes(), uint32(closeTime), 100e18);
+                vm.warp(closeTime);
+                rounds.settle(roundId, _anchorBytes(), _closeBytes());
+                expected = MakoRoundsV1.RefundReason.Tie;
+            } else {
+                vm.warp(submitDeadline);
+                rounds.finalizeRefund(roundId);
+                expected = MakoRoundsV1.RefundReason.NoPrice;
+            }
+
+            MakoRoundsV1.Round memory r = rounds.roundOf(roundId);
+            assertEq(uint256(r.refundReason), uint256(expected), "the refund reason");
+            assertEq(r.protocolFee + r.creatorFee, 0, "a refund charges no fee");
+
+            uint256 a0 = usdc.balanceOf(alice);
+            uint256 c0 = usdc.balanceOf(creator);
+            uint256 b0 = usdc.balanceOf(bob);
+            vm.prank(alice);
+            rounds.claim(roundId);
+            vm.prank(creator);
+            rounds.claim(roundId);
+            if (reason != 0) {
+                vm.prank(bob);
+                rounds.claim(roundId);
+            }
+            assertEq(usdc.balanceOf(alice) - a0, 15_000_000, "alice gets exactly her two entries back");
+            assertEq(usdc.balanceOf(creator) - c0, 7_000_000, "the creator gets exactly the stake, no fee");
+            assertEq(usdc.balanceOf(bob) - b0, reason == 0 ? 0 : 30_000_000, "bob gets exactly his stake");
+            assertEq(usdc.balanceOf(address(rounds)), 0, "nothing of the round is left in the contract");
+            assertEq(rounds.treasuryBalance(), 0, "the treasury accrues nothing from a refund");
+
+            vm.revertToState(snap);
+        }
+    }
+
     /// @notice N5: funds are never stuck past submitDeadline. NoPrice from submitDeadline, +/- 1.
     function test_FinalizeRefundAfterDeadline() public {
         _twoSided();

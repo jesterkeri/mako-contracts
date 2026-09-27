@@ -557,6 +557,38 @@ and error specificity. That is exactly what the v8 and v11 rows do: with the pre
 still reject, as `WrongFeed`, so only asserting the exact selector detects the mutation. Recorded in
 `CASES.json` under `_impossibleCases`.
 
+### T1.4: every contract invariant maps to real evidence (2026-09-28)
+
+`INVARIANTS.md` names a test for each contract-enforced invariant. An audit against the suite found that 20
+of those names did not exist as written. Most were covered under other names:
+- **N1**: corpus rows.
+- **N7, N10**: the ABI surface check.
+- **N17, N18**: renamed tests.
+- **N16, N22**: deploy-script assertions, which wait for T1.5.
+
+Two were genuine gaps and got new tests:
+- **N1b, `test_NoRoleCanForceRefundBeforeDeadline`.** For a two-sided round, `finalizeRefund` refuses the
+  creator, the treasury, both entrants, a stranger and the test contract, at `entryCloseTime`,
+  `startTime`, `closeTime` and `submitDeadline - 1`.
+- **N17 refund half, `test_ConservationRefund`.** For each refund reason (OneSided, Tie, NoPrice), with
+  topped-up stakes, every entrant gets back exactly their total stake, no fee is charged, the treasury
+  accrues nothing, and the contract ends holding nothing of the round.
+
+Each new test fails for its defect:
+- Moving the NoPrice deadline to `closeTime` fails the N1b test, and existing tests catch it too.
+- Paying back 99% of a stake, or paying the pool out pro rata instead of the stake, fails
+  `test_ConservationRefund`.
+
+The two refund mutants were added to `script/mutate-solidity.mjs`. The full sweep then gave **67 killed, 0
+not killed**. The NoPrice mutant is killed by `test_NoRoleCanForceRefundBeforeDeadline` among others, and
+both refund mutants by `test_ConservationRefund` among others.
+
+`test/fixtures/invariant-coverage.json` maps each of the 23 contract-enforced invariants to its tests,
+corpus rows and scripts. `script/check-invariants.mjs`, in CI, fails if any named test, corpus row or script
+does not exist, or if an expected invariant has no entry. It was shown to fail on a renamed test and on a
+dropped invariant. N16 and N22's deploy-script halves are deferred to T1.5, which the map records by name.
+The map proves the evidence exists; the mutation sweep proves the evidence can fail.
+
 ---
 
 ## §4 Mutation testing

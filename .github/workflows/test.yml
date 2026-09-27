@@ -56,6 +56,9 @@ jobs:
       - name: Archive probe re-checks trust before every request (delayed and same-size trust-store changes)
         run: node script/test-probe-tls-deferred.mjs
 
+      - name: Every contract invariant maps to real tests, corpus rows or scripts (T1.4)
+        run: node script/check-invariants.mjs
+
       - name: Run Forge fmt
         run: forge fmt --check
 
