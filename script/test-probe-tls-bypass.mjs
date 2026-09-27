@@ -6,7 +6,7 @@
 //
 // Same pattern as test-probe-tls.mjs: the REAL probe runs from a temp copy of the repo against a local
 // CONNECT proxy that sends every tunnel to a local TLS server whose certificate only a throwaway test CA
-// vouches for. Sentinel credentials, hosts under .invalid, no network, the working tree is not modified.
+// vouches for. Fixed provider urls under .invalid, no network, the working tree is not modified.
 //
 // tlsWeakening() looks for exact tokens `--use-openssl-ca` / `--use-system-ca` in execArgv and in
 // NODE_OPTIONS split on whitespace. Node accepts the same trust-widening settings in other forms, and each
@@ -33,8 +33,6 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
-const SENTINEL_A = 'SENTINELADVAKEYaaaa1111';
-const SENTINEL_B = 'SENTINELADVBKEYbbbb2222';
 
 // ---- honest answers, from the repo's own vendored fixtures ----
 const VERIFIER_CODE = readFileSync(join(REPO, 'test/fixtures/datastreams/verifier-runtime-62922075.hex'), 'utf8').trim();
@@ -101,8 +99,8 @@ function tree() {
   cpSync(join(REPO, 'test/fixtures/datastreams/pending'), join(dir, 'test/fixtures/datastreams/pending'), { recursive: true });
   writeFileSync(join(dir, 'script/providers.json'), JSON.stringify({
     providers: [
-      { id: 'remote-a', host: 'rpc-a.example.invalid', urlEnv: 'MAKO_RPC_REMOTE_A', operator: 'Remote Operator A', credentialed: true },
-      { id: 'remote-b', host: 'rpc-b.example.invalid', urlEnv: 'MAKO_RPC_REMOTE_B', operator: 'Remote Operator B', credentialed: true },
+      { id: 'remote-a', host: 'rpc-a.example.invalid', url: 'https://rpc-a.example.invalid/', operator: 'Remote Operator A' },
+      { id: 'remote-b', host: 'rpc-b.example.invalid', url: 'https://rpc-b.example.invalid/', operator: 'Remote Operator B' },
     ],
   }));
   return dir;
@@ -144,8 +142,7 @@ async function runProbe(nodeArgs, env) {
     const runs = existsSync(evDir) ? readdirSync(evDir) : [];
     const resultText = runs.length && existsSync(join(evDir, runs[0], 'RESULT.json')) ? readFileSync(join(evDir, runs[0], 'RESULT.json'), 'utf8') : null;
     const result = resultText ? JSON.parse(resultText) : null;
-    const leaked = [SENTINEL_A, SENTINEL_B].some((s) => (resultText || '').includes(s.slice(0, 10)) || r.out.includes(s.slice(0, 10)));
-    return { code: r.status, out: r.out, result, leaked };
+    return { code: r.status, out: r.out, result };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -154,8 +151,6 @@ async function runProbe(nodeArgs, env) {
 const remote = {
   MAKO_PROVIDER_A: 'remote-a',
   MAKO_PROVIDER_B: 'remote-b',
-  MAKO_RPC_REMOTE_A: `https://rpc-a.example.invalid/v2/${SENTINEL_A}`,
-  MAKO_RPC_REMOTE_B: `https://rpc-b.example.invalid/v2/${SENTINEL_B}`,
   HTTPS_PROXY: PROXY,
   NODE_USE_ENV_PROXY: '1',
   MAKO_PROBE_RPC_TIMEOUT_MS: '3000',
@@ -179,14 +174,14 @@ for (const sc of scenarios) {
   impostorAnswers = 0;
   const r = await runProbe(sc.args, { ...remote, ...sc.env });
   const ok = sc.control
-    ? tunnels.length > 0 && impostorAnswers === 0 && !green(r) && !r.leaked
-    : live === true && impostorAnswers === 0 && !green(r) && !r.leaked;
+    ? tunnels.length > 0 && impostorAnswers === 0 && !green(r)
+    : live === true && impostorAnswers === 0 && !green(r);
   if (!ok) bad++;
   console.log(`  [${ok ? ' ok ' : 'FAIL'}] ${sc.name}`);
   if (!sc.control) console.log(`         PRECONDITION setting makes Node trust the test CA: ${live}`);
   console.log(`         exit ${r.code}, status ${r.result?.status ?? 'none'}, proofLevel ${r.result?.proofLevel ?? 'none'}, ` +
     `operators ${r.result ? Object.values(r.result.providers || {}).map((p) => p.provider?.operator).join(' + ') : 'none'}, ` +
-    `tunnels ${tunnels.length}, impostor answers ${impostorAnswers}, leaked ${r.leaked}`);
+    `tunnels ${tunnels.length}, impostor answers ${impostorAnswers}`);
 }
 impostor.close(); proxy.close();
 rmSync(certDir, { recursive: true, force: true });

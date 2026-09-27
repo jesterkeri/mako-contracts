@@ -26,39 +26,21 @@
 // stronger than a pinned lockfile. If it ever needs ABI encoding beyond two `bytes` arguments, move
 // it into that package rather than hand-rolling more.
 //
-// URLs come from the environment so a key-bearing endpoint is never committed. See providers.json.
+// KEYLESS BY CONSTRUCTION (2026-09-27). The probe talks only to the fixed, public 'url' of each provider in
+// script/providers.json and reads no URL from the environment, so the process that writes public evidence
+// never holds a secret. Codex diff review round 6 showed the previous design, which read URLs from
+// environment variables and redacted them, still let a key into a "keyless" proof run; before that, twelve
+// adversary passes had grown ~2,500 lines of redaction around that environment input. That machinery is
+// gone (it is in git history up to 56d307b). What remains protects the PROOF: https only, certificate
+// trust equal to Node's bundled CA set, no redirects, bounded requests, and evidence that records a
+// provider-chosen value only when it equals its pin. Credentialed endpoints are checked by hand with
+// mako-design/scripts/check-alchemy-key.sh, which writes no evidence.
 
 import { createHash } from 'node:crypto';
 import tls from 'node:tls';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-
-// A diagnostic report (e.g. NODE_OPTIONS=--report-on-signal, fired by a CI job cancel) is written from native
-// code and would print the whole environment, RPC URLs included; the eleventh adversary pass showed exactly
-// that. Excluded here, first, and the URL variables are also deleted from the environment once read.
-if (process.report) process.report.excludeEnv = true;
-
-// No Node command-line options, except preloads (--require / --import, which are operator code and out of
-// scope). The twelfth adversary pass showed `node --trace` printing every function's arguments from native
-// code, full URL and credential included, hundreds of times; earlier passes found three --print-regexp /
-// --trace-regexp options doing the same for the scrub pattern, and two config-file flags widening TLS trust.
-// An allowlist of none closes that family, including options not yet invented. It runs before anything
-// reads a URL. (NODE_OPTIONS cannot carry --trace; its trust effects are caught by tlsWeakening.)
-{
-  const bad = [];
-  const argv = process.execArgv;
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === '--require' || a === '-r' || a === '--import') { i++; continue; }
-    if (a.startsWith('--require=') || a.startsWith('--import=')) continue;
-    bad.push(a.split('=')[0]);
-  }
-  if (bad.length) {
-    process.stderr.write(`REFUSING TO RUN: node options ${[...new Set(bad)].join(', ')} can print or change what this probe must keep secret or trust. Run it as: node script/probe-archive.mjs\n`);
-    process.exit(2);
-  }
-}
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, '..');
@@ -188,8 +170,8 @@ async function rpc(url, method, params) {
     clearTimeout(timer);
   }
   let parsed; try { parsed = JSON.parse(text); } catch { parsed = null; }
-  // The raw response text is NOT returned: it is provider-controlled and may echo the request URL. Only its
-  // hash leaves this function, for correlation.
+  // The raw response text is not returned, only its hash for correlation: evidence carries parsed, checked
+  // values, never provider prose.
   return { httpStatus: res.status, body: parsed, requestHash: sha256(body), responseHash: sha256(text) };
 }
 
@@ -218,11 +200,8 @@ async function rpcWithRetry(url, method, params) {
   return { attempts, served: false };
 }
 
-// PROVIDER ERROR TEXT IS UNTRUSTED AND MAY BE SECRET-BEARING. A provider, gateway or proxy is free to
-// echo the request URL, credential included, in a JSON-RPC error message. The Codex diff review (round 4)
-// showed the previous version printing that message verbatim to stdout, where a CI run publishes it,
-// BEFORE the evidence guard ever ran. So a message is inspected transiently by `isRevert` and `categorize`
-// and NEVER returned, stored or logged: only a locally derived category and the numeric code survive.
+// Provider error text is untrusted prose, so it is inspected transiently by `isRevert` and `categorize` and
+// never stored or logged: only a locally derived category and a standard numeric code survive.
 function categorize(err, httpStatus) {
   if (!err) return httpStatus === 200 ? 'ok' : `http-${Number(httpStatus) || 0}`;
   const m = msgOf(err);
@@ -233,8 +212,7 @@ function categorize(err, httpStatus) {
   return 'rpc-error';
 }
 // Only a STANDARD JSON-RPC code is kept: 3 (execution reverted) and the reserved -32768..-32000 range. Any
-// other integer is provider-chosen data, and the adversary pass showed a digits-only credential minus one
-// digit returned as `code` reaching both stdout and evidence.
+// other integer is provider-chosen data.
 // A message that is not a string is ignored rather than coerced: `String()` on a provider object can run
 // or fail on provider-chosen `toString`, and either way the text would be provider data.
 const msgOf = (err) => (typeof err?.message === 'string' ? err.message.toLowerCase() : '');
@@ -253,8 +231,7 @@ function isRevert(err) {
 //
 // A return is well-formed only if it is EXACTLY the envelope a v3 report produces: 352 bytes, offset 32,
 // length 288. Anything else is malformed, and a malformed return is described by a fixed reason code
-// alone: no lengths and no bytes, since every one of those is provider-chosen (round 5 of the Codex diff
-// review showed a malformed result carrying a hex-encoded credential into evidence).
+// alone: no lengths and no bytes, since every one of those is provider-chosen.
 function decodeVerifyReturn(resultHex) {
   if (!isHex(resultHex)) return { ok: false, reason: 'not-hex' };
   const b = Buffer.from(resultHex.slice(2), 'hex');
@@ -288,270 +265,32 @@ function decodeVerifyReturn(resultHex) {
 
 // ---- providers ----
 const record = JSON.parse(readFileSync(join(HERE, 'providers.json'), 'utf8'));
-// A provider id comes from MAKO_PROVIDER_A/B, and a URL pasted there by mistake would be printed and
-// recorded as the id. So an id is recorded only if providers.json lists it, and an unknown one is never
-// quoted back (third adversary pass).
+/// A provider selected by id (MAKO_PROVIDER_A/B, ids only, never URLs). Its URL is the fixed public one in
+/// providers.json. Refused unless that URL is exactly https://<recorded host>/ (plain http only to a
+/// loopback test server) and certificate checking is intact.
 function resolveProvider(id) {
   const p = record.providers.find((x) => x.id === id);
-  if (!p) return { id: 'unknown', error: 'the selected provider id is not listed in providers.json (it is not quoted here, in case it was a URL)' };
-  // A PROOF run uses keyless providers only, so the process that writes public evidence never holds a secret.
-  // Decided by Joshua on 2026-09-26 after twelve adversary passes on this file's redaction: QuickNode's and
-  // Monad Foundation's public endpoints are two distinct operators and need no key, so a credential adds
-  // nothing to the proof and only risk. Checked BEFORE the variable is read. Credentialed providers remain
-  // usable for diagnostic runs, where all the redaction below still applies.
-  if (AS_PROOF && p.credentialed) return { id, error: `provider "${id}" is credentialed; a proof run uses keyless providers only (use a diagnostic run without --as-proof for a credentialed endpoint)` };
-  // Read ONCE and remembered, because the variable is deleted below: selecting the same provider for A and
-  // B read it a second time and falsely reported it unset (twelfth adversary pass).
-  if (!ENV_URLS.has(p.urlEnv)) ENV_URLS.set(p.urlEnv, process.env[p.urlEnv]);
-  const url = ENV_URLS.get(p.urlEnv);
-  if (!url) return { id, error: `environment variable ${p.urlEnv} is not set` };
-  let host, scheme; try { ({ host, protocol: scheme } = new URL(url)); } catch { return { id, error: `${p.urlEnv} is not a URL` }; }
-  // HTTPS only (plain HTTP to a loopback test server excepted). Over plain HTTP, anything on the network
-  // path, or a proxy Node is configured to use (NODE_USE_ENV_PROXY with HTTP_PROXY), can answer in the
-  // endpoint's place and the evidence would name an operator that never answered (fourth adversary pass).
-  // Over HTTPS a proxy only tunnels, and the endpoint's certificate authenticates who answered.
-  const loopback = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(host);
-  if (scheme !== 'https:' && !(scheme === 'http:' && loopback)) return { id, error: `${p.urlEnv} must be an https:// URL` };
-  // And HTTPS only proves who answered while certificate checking is intact. The sixth adversary pass had
-  // NODE_TLS_REJECT_UNAUTHORIZED=0, or NODE_EXTRA_CA_CERTS naming an attacker's CA, let one impostor behind a
-  // proxy answer for BOTH operators, and the run went VERIFIED_MATCH as two distinct operators.
-  const weakened = tlsWeakening();
-  if (scheme === 'https:' && weakened.length) {
+  // An unknown id is never quoted back: someone could paste a URL into MAKO_PROVIDER_A by mistake.
+  if (!p) return { id: 'unknown', error: 'the selected provider id is not listed in providers.json (it is not quoted here)' };
+  let u; try { u = new URL(p.url); } catch { return { id, error: `providers.json gives provider "${id}" no valid url` }; }
+  const loopback = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(u.host);
+  const exact = u.href === p.url && u.pathname === '/' && !u.search && !u.hash && !u.username && !u.password && u.host === p.host;
+  if (!exact) return { id, error: `provider "${id}" url must be exactly <scheme>://${p.host}/ with no path, query, userinfo or fragment` };
+  // HTTPS only: over plain HTTP anything on the path, or a proxy, could answer in the operator's place.
+  if (u.protocol !== 'https:' && !(u.protocol === 'http:' && loopback)) return { id, error: `provider "${id}" url must be https://` };
+  const weakened = u.protocol === 'https:' ? tlsWeakening() : [];
+  if (weakened.length) {
     return { id, error: `TLS certificate checking is weakened in this environment: ${weakened.join('; ')}. No certificate can then prove which operator answers; remove the setting and re-run` };
   }
-  if (host !== p.host) return { id, error: `resolved host "${host}" is not the approved host "${p.host}" for provider "${id}"` };
-  if (process.env.NODE_DEBUG_NATIVE) return { id, error: 'NODE_DEBUG_NATIVE is set; native debug output bypasses redaction, so the probe refuses to run with it' };
-  const refused = refuseUrlShape(url);
-  if (refused) return { id, error: `${p.urlEnv} ${refused}` };
-  // THE URL NEVER ENTERS THE PROVIDER OBJECT. It goes into a private map that nothing serializes, and
-  // the object returned here, which IS written into evidence, carries only non-secret fields.
-  //
-  // 2026-09-24: the first version returned `{ id, url, ... }` and stored that object in the results as
-  // `provider: p`, so RESULT.json contained the full URL. A run with a credentialed Alchemy endpoint wrote
-  // Joshua's key into a tracked evidence file, which was committed to a PUBLIC repository. The key must
-  // be rotated. Redacting at each write site would leave the next new write site to leak it again, so the
-  // secret is kept out of the object entirely, and `writeEvidence` refuses to write anything containing
-  // any secret form of a configured URL (see `secretFragments`) as a last line of defence.
-  URLS.set(id, url);
-  // Out of the environment as soon as it is held privately: nothing that dumps the environment later (a
-  // diagnostic report, a child process, a crash handler) can then see it.
-  delete process.env[p.urlEnv];
-  return { id, host, operator: p.operator, credentialed: p.credentialed, endpointConfigSha256: sha256(`${id}|${host}`) };
+  return { id, url: p.url, host: p.host, operator: p.operator };
 }
+const urlOf = (p) => p.url;
 
-/// id -> full URL, possibly key-bearing. Module-private and NEVER serialized.
-const URLS = new Map();
-/// env var name -> its value as first read. Module-private and NEVER serialized.
-const ENV_URLS = new Map();
-const urlOf = (p) => URLS.get(p.id);
+process.on('uncaughtException', (e) => { console.error(`uncaught: ${e?.message ?? e}`); process.exit(1); });
+process.on('unhandledRejection', (e) => { console.error(`unhandled: ${e?.message ?? e}`); process.exit(1); });
 
-// ---- what counts as secret in a configured URL ----
-//
-// The Codex diff review (round 5) showed the guard knew only COMPOUND forms: the whole URL, its path and
-// its query. A provider holds the credential already, so it can echo the token ON ITS OWN ("invalid key
-// Qx7...") or hex-encoded in a result, and neither contains "/v2/" or "?apikey=". The adversary pass on
-// that fix then showed that matching whole atoms is not enough either: the key minus ONE character,
-// hex-encoded in a result, matched nothing, and one missing character is trivial to brute-force.
-//
-// So the unit of secrecy is any WINDOW of WINDOW bytes of any credential atom, not the atom. An atom is
-// every path segment and every query key and value, in each spelling: as written, and percent-decoded
-// BYTEWISE (so an escape that is not valid UTF-8 still decodes) with `+` kept and with `+` as a space.
-// Each window is matched as latin1 and UTF-8 text, hex and percent-encoded, and every 6-byte window as
-// base64 and base64url, which covers a base64 echo of any WINDOW consecutive credential bytes at any
-// alignment. Matching is case-insensitive, and the evidence guard also matches JSON-escaped forms.
-//
-// An atom shorter than MIN_ATOM bytes cannot be windowed without redacting ordinary text, so a URL
-// component is either a known generic part of an endpoint (`v2`, `rpc`, `apikey`...) or at least
-// MIN_ATOM bytes, in every spelling. A short non-generic component is REFUSED at configuration time: a
-// short credential is still a credential. User:password credentials and #fragments are refused outright.
-const MIN_ATOM = 8;
-const WINDOW = 10;
-// `v` + AT MOST three digits: an unbounded `v\d+` let a credential shaped `v31415926535...` count as a
-// version label, so it was neither refused nor redacted (second adversary pass on round 5).
-const GENERIC_COMPONENT = /^(v\d{1,3}|rpc|api|apikey|api_key|api-key|key|token|auth)$/i;
-
-/// Percent-decodes to BYTES, never failing: `%XX` becomes that byte, anything else its UTF-8 bytes.
-function pctBytes(c) {
-  const out = [];
-  for (let i = 0; i < c.length; i++) {
-    if (c[i] === '%' && /^[0-9a-fA-F]{2}$/.test(c.slice(i + 1, i + 3))) { out.push(parseInt(c.slice(i + 1, i + 3), 16)); i += 2; }
-    else out.push(...Buffer.from(c[i]));
-  }
-  return Buffer.from(out);
-}
-
-/// Each non-generic path segment and query key or value, as { raw, bytes }.
-function urlAtoms(u) {
-  const out = [];
-  for (const seg of u.pathname.split('/')) if (seg) out.push(seg);
-  for (const part of u.search.replace(/^\?/, '').split('&')) {
-    if (!part) continue;
-    const eq = part.indexOf('=');
-    for (const c of eq < 0 ? [part] : [part.slice(0, eq), part.slice(eq + 1)]) if (c) out.push(c);
-  }
-  // `+` means a space in a query but a literal `+` in a path, so both decodings are kept as spellings.
-  return out
-    .map((raw) => ({ raw, spellings: [Buffer.from(raw), pctBytes(raw), pctBytes(raw.replace(/\+/g, ' '))] }))
-    .filter((a) => a.spellings.every((b) => !GENERIC_COMPONENT.test(b.toString('latin1'))));
-}
-
-/// Returns why a URL's shape is refused, or null. The reason never quotes the URL or any part of it.
-function refuseUrlShape(url) {
-  const u = new URL(url);
-  if (u.username || u.password) return 'carries user:password credentials, which this probe refuses';
-  if (u.hash) return 'has a #fragment, which this probe refuses';
-  for (const a of urlAtoms(u)) {
-    // ASCII only. Real API keys are ASCII, and a non-ASCII credential needs Unicode case folding and
-    // encoding forms (UTF-16, raw non-UTF-8 bytes) that byte search cannot match as the old regex's `i`
-    // flag did (twelfth adversary pass). Refusing it closes that whole class.
-    if (a.spellings.some((b) => b.some((x) => x > 0x7e || x < 0x20))) {
-      return 'has a path segment or query component with non-ASCII or control characters; only ASCII credentials can be redacted reliably, so the probe refuses it';
-    }
-    if (a.spellings.some((b) => b.length < MIN_ATOM)) {
-      return `has a path segment or query component shorter than ${MIN_ATOM} characters that is not a known generic part; it could not be redacted reliably, so the probe refuses it`;
-    }
-  }
-  return null;
-}
-
-/// Every window of `n` bytes of `b`, or `b` itself when shorter.
-function windows(b, n) {
-  if (b.length <= n) return [b];
-  const out = [];
-  for (let i = 0; i + n <= b.length; i++) out.push(b.subarray(i, i + n));
-  return out;
-}
-
-/// Every secret-bearing form of every configured URL, longest first. Hosts are not secret.
-function secretFragments() {
-  const out = new Set();
-  for (const url of URLS.values()) {
-    const u = new URL(url);
-    for (const whole of [url, u.pathname !== '/' ? u.pathname : '', u.search]) if (whole.length >= MIN_ATOM) out.add(whole);
-    for (const a of urlAtoms(u)) {
-      for (const b of a.spellings) {
-        // A credential made of multi-byte characters: every WINDOW consecutive CHARACTERS, when it is valid UTF-8.
-        const chars = Array.from(b.toString('utf8'));
-        if (!chars.includes('\uFFFD')) {
-          for (let i = 0; i + WINDOW <= chars.length; i++) out.add(chars.slice(i, i + WINDOW).join(''));
-        }
-        for (const w of windows(b, WINDOW)) {
-          out.add(w.toString('latin1'));
-          out.add(w.toString('utf8')); // a non-ASCII credential echoed as text
-          out.add(w.toString('hex'));
-          out.add(Buffer.from(w.toString('latin1'), 'utf16le').toString('latin1')); // a UTF-16 write
-          out.add(encodeURIComponent(w.toString('utf8')));
-          out.add([...w].map((x) => '%' + x.toString(16).padStart(2, '0')).join('')); // every byte escaped
-        }
-        // Base64 in whole 3-byte groups, so each fragment's characters do not depend on the next byte. Any
-        // echo of WINDOW consecutive credential bytes contains a 6-byte run on a 3-byte boundary.
-        for (const w of windows(b, 6)) {
-          out.add(w.toString('base64'));
-          out.add(w.toString('base64url'));
-        }
-      }
-    }
-  }
-  return [...out].filter(Boolean).sort((x, y) => y.length - x.length);
-}
-
-// ---- scrubbing: no regex built from secrets, bytes not text, whole lines ----
-//
-// The eleventh adversary pass showed V8's --trace-regexp-parser / --print-regexp-bytecode / --print-regexp-code
-// printing the SOURCE of the scrub regex, which was built from every credential window. So no regex is built
-// from secret material at all: fragments are found with plain byte search. Matching is ASCII
-// case-insensitive, done on bytes, so a write's encoding (hex, latin1...) and multi-byte characters pass
-// through byte-for-byte, which the old text-level wrapper broke.
-const asciiLower = (b) => { const o = Buffer.from(b); for (let i = 0; i < o.length; i++) if (o[i] >= 65 && o[i] <= 90) o[i] += 32; return o; };
-let fragCache = { key: null, frags: [] };
-function secretFragmentBytes() {
-  const key = [...URLS.values()].join('\n');
-  if (fragCache.key !== key) {
-    fragCache = { key, frags: [...new Set(secretFragments().map((f) => asciiLower(Buffer.from(f, 'utf8')).toString('latin1')))].map((f) => Buffer.from(f, 'latin1')) };
-  }
-  return fragCache.frags;
-}
-const REDACTED = Buffer.from('[redacted]');
-function scrubBytes(buf) {
-  const frags = secretFragmentBytes();
-  if (!frags.length || !buf.length) return buf;
-  const lower = asciiLower(buf);
-  const mark = new Uint8Array(buf.length);
-  let any = false;
-  for (const f of frags) {
-    for (let i = lower.indexOf(f); i !== -1; i = lower.indexOf(f, i + 1)) { mark.fill(1, i, i + f.length); any = true; }
-  }
-  if (!any) return buf;
-  const out = [];
-  for (let i = 0; i < buf.length;) {
-    if (mark[i]) { while (i < buf.length && mark[i]) i++; out.push(REDACTED); }
-    else { let j = i; while (j < buf.length && !mark[j]) j++; out.push(buf.subarray(i, j)); i = j; }
-  }
-  return Buffer.concat(out);
-}
-function scrub(text) { return scrubBytes(Buffer.from(String(text), 'utf8')).toString('utf8'); }
-
-{
-  // Scrubbed at the STREAM, not at console: the tenth adversary pass showed NODE_DEBUG=fetch making Node's
-  // bundled undici print every request URL through util.debuglog straight to process.stderr. Everything
-  // JavaScript in this process writes to stdout or stderr passes here, as BYTES in the write's own
-  // encoding, held until a newline so a credential cannot be split across two writes and escape the
-  // search. Pending bytes are flushed (scrubbed) on exit, and at 64 KiB. (NODE_DEBUG_NATIVE writes from native
-  // code and cannot be scrubbed from JavaScript, so resolveProvider refuses to run with it set.)
-  const flushers = [];
-  const MAX_PENDING = 64 * 1024;
-  // When a line exceeds MAX_PENDING it is flushed in part, KEEPING the last (longest fragment - 1) bytes, so
-  // a credential straddling the cut is still whole in the next search (twelfth adversary pass).
-  const keepTail = () => Math.max(0, ...secretFragmentBytes().map((f) => f.length)) - 1;
-  let exiting = false;
-  for (const stream of [process.stdout, process.stderr]) {
-    const write = stream.write.bind(stream);
-    let pending = Buffer.alloc(0);
-    stream.write = (chunk, encoding, cb) => {
-      const done = typeof encoding === 'function' ? encoding : cb;
-      let buf;
-      if (typeof chunk === 'string') buf = Buffer.from(chunk, typeof encoding === 'string' ? encoding : 'utf8');
-      else if (chunk instanceof Uint8Array) buf = Buffer.from(chunk);
-      else return write(chunk, encoding, cb);
-      pending = pending.length ? Buffer.concat([pending, buf]) : buf;
-      const cut = exiting ? pending.length
-        : pending.length > MAX_PENDING ? Math.max(pending.lastIndexOf(0x0a) + 1, pending.length - keepTail())
-        : pending.lastIndexOf(0x0a) + 1;
-      if (cut === 0) { if (done) process.nextTick(done); return true; }
-      const ready = pending.subarray(0, cut);
-      pending = pending.subarray(cut);
-      return write(scrubBytes(ready), done);
-    };
-    const flush = () => { exiting = true; if (pending.length) { const rest = pending; pending = Buffer.alloc(0); write(scrubBytes(rest)); } };
-    process.on('exit', flush);
-    flushers.push(flush);
-  }
-  // A default signal death emits no 'exit', so held bytes would be lost on a CI cancel: flush, then re-raise
-  // the same signal with the handler gone, so the process still dies BY that signal exactly as before.
-  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
-    process.once(sig, () => { for (const f of flushers) f(); process.kill(process.pid, sig); });
-  }
-  const err = console.error.bind(console);
-  // An uncaught error's message can quote provider data too. Print it scrubbed, then fail.
-  process.on('uncaughtException', (e) => { err(scrub(`uncaught: ${e?.message ?? e}`)); process.exit(1); });
-  process.on('unhandledRejection', (e) => { err(scrub(`unhandled: ${e?.message ?? e}`)); process.exit(1); });
-}
-
-/// The only function that writes evidence. Before writing, it checks the serialized text for every secret
-/// form of every configured URL (see `secretFragments`: compound forms AND each credential on its own,
-/// raw, percent-encoded, hex and base64) and refuses to write if any appears.
 function writeEvidence(dir, name, obj) {
-  const text = JSON.stringify(obj, null, 2);
-  const lower = text.toLowerCase();
-  for (const f of secretFragments()) {
-    // A fragment with a quote, backslash or control byte appears JSON-escaped in the serialized text.
-    const frag = JSON.stringify(f).slice(1, -1);
-    if (text.includes(f) || lower.includes(f.toLowerCase()) || lower.includes(frag.toLowerCase())) {
-      console.error(`REFUSING TO WRITE EVIDENCE: it would contain part of a configured RPC URL. Nothing was written.`);
-      process.exit(5);
-    }
-  }
-  writeFileSync(join(dir, name), text);
+  writeFileSync(join(dir, name), JSON.stringify(obj, null, 2));
 }
 
 function proofLevel(a, b) {
@@ -616,10 +355,8 @@ async function identity(p, block) {
     };
   }
   // EVERY VALUE BELOW IS PROVIDER-CHOSEN, so none is recorded verbatim unless it equals its pin; any other
-  // value becomes `MISMATCH sha256:<hash>`. Before round 5 the addresses were the last 40 hex characters of
-  // whatever came back, so a result carrying a hex-encoded credential would have been TRUNCATED into
-  // evidence, and a truncated credential defeats any string guard. Comparing to the pin first, and
-  // hashing on mismatch, leaves nothing to truncate. The comparison (`ok`) uses the raw values.
+  // value becomes `MISMATCH sha256:<hash>`, which keeps provider-chosen bulk out of the evidence. The
+  // comparison (`ok`) uses the raw values.
   const raw = {
     chainId: toNumber(cid.body.result),
     codeHex: typeof code.body.result === 'string' ? code.body.result : '',
@@ -706,7 +443,7 @@ console.log(`provider B: ${B.error ? `UNAVAILABLE (${B.error})` : `${B.host}  op
 if (A.error || B.error) {
   const out = { checkedAt: new Date().toISOString(), status: 'ARCHIVE_UNAVAILABLE', reason: 'a provider could not be resolved', providerA: A, providerB: B };
   writeEvidence(OUT, 'RESULT.json', out);
-  console.error(`\nARCHIVE_UNAVAILABLE: a provider could not be resolved. Set the URL env vars named in script/providers.json.`);
+  console.error(`\nARCHIVE_UNAVAILABLE: a provider could not be resolved (see the reason above).`);
   console.error(`evidence: ${OUT}`);
   process.exit(2);
 }
@@ -731,7 +468,6 @@ console.log(`block ${DEFAULT_TARGET.block}, calldata ${(calldata.length - 2) / 2
 
 const results = {};
 const resultHashes = {};
-const held = {}; // provider-chosen verify bytes, recorded only if shared; see below
 for (const p of [A, B]) {
   console.log(`--- ${p.id} (${p.host}) ---`);
   const ident = await identity(p, DEFAULT_TARGET.block);
@@ -769,18 +505,15 @@ for (const p of [A, B]) {
   } else {
     console.log(`  verify: MALFORMED RETURN, ${dec.reason}`);
   }
-  // The return's bytes, and every field decoded from them, are provider-chosen. They are held back here and
-  // recorded below ONLY if both providers, run by distinct operators, returned identical bytes: neither
-  // operator knows the other's credential, so a shared answer cannot carry either one. Until then a
-  // provider's return is recorded as a hash and a reason code. The adversary pass on round 5 showed a
-  // well-formed return carrying the key minus one character, which no string guard matches reliably.
+  // A well-formed return (exactly 352 bytes) is recorded in full; a malformed one by hash and reason code,
+  // which keeps provider-chosen bulk out of the evidence.
   resultHashes[p.id] = sha256(textOf(call.body.result));
-  held[p.id] = { rawResult: call.body.result, decoded: dec };
   results[p.id] = {
     provider: p, identity: ident, identityOk: idOk, status: 'SERVED',
     attempts: call.attempts, requestHash: call.requestHash, responseHash: call.responseHash,
     rawResultSha256: resultHashes[p.id],
-    decoded: dec.ok ? { ok: true, payloadSha256: dec.payloadSha256 } : dec,
+    ...(dec.ok ? { rawResult: call.body.result } : {}),
+    decoded: dec,
   };
   console.log('');
 }
@@ -794,11 +527,6 @@ else if (resultHashes[A.id] !== resultHashes[B.id]) status = 'VERIFICATION_MISMA
 else if (!rA.decoded?.ok || !rB.decoded?.ok) status = 'VERIFICATION_MISMATCH'; // a served but malformed return
 else if (!rA.identityOk || !rB.identityOk) status = 'VERIFICATION_MISMATCH';
 else status = 'VERIFIED_MATCH';
-
-// The shared answer, recorded in full: the only provider-chosen bytes this file ever holds verbatim.
-const shared = level === 'two-distinct-operators' && resultHashes[A.id] !== undefined &&
-  resultHashes[A.id] === resultHashes[B.id] && held[A.id].decoded.ok;
-if (shared) for (const id of [A.id, B.id]) Object.assign(results[id], held[id]);
 
 const out = {
   checkedAt: new Date().toISOString(),

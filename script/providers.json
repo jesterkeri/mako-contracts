@@ -1,27 +1,26 @@
 {
   "$comment": [
-    "The approved-provider record for T0.1's network scripts. PROOF_STANDARD.md Version 3 \u00a711",
-    "requires a two-provider claim to use providers with DIFFERENT OPERATORS, and requires that",
-    "independence to be checked against a machine-readable record rather than asserted in prose.",
-    "This is that record.",
+    "The approved-provider record for T0.1's archive probe. PROOF_STANDARD.md Version 3 §11 requires a",
+    "two-provider claim to use providers with DIFFERENT OPERATORS, checked against a machine-readable record.",
     "",
-    "URLs are NOT stored here. A provider's URL is supplied by the environment variable named in",
-    "'urlEnv' so that a key-bearing endpoint is never committed. Each run records the sanitized",
-    "canonical host it actually resolved to and refuses to proceed if that host is not the one this",
-    "record approves for that provider id.",
+    "2026-09-27: each provider carries its FIXED, PUBLIC, KEYLESS 'url', and the probe reads no URL from the",
+    "environment. Decided by Joshua after Codex diff review round 6 showed that a proof run still read",
+    "caller-supplied URLs for providers merely LABELLED keyless, so a key in a path or query could enter it.",
+    "A 'url' must be exactly https://<host>/ : root path, no query, no userinfo, no fragment. Credentialed",
+    "endpoints (Alchemy) are not in this record at all; they are checked by hand with",
+    "mako-design/scripts/check-alchemy-key.sh, which prints only HTTP status and never writes evidence.",
     "",
-    "'operator' must be a real, checkable operator identity. 'unknown' is honest and is exactly why",
-    "a pair containing it yields proofLevel 'one-domain' rather than 'two-distinct-operators'.",
-    "2026-09-23: operators for the two public endpoints corrected from 'unknown' to QuickNode and Monad Foundation, sourced from Monad's own documentation. They were never unknowable; nobody had looked. Any pair drawn from {QuickNode, Monad Foundation, Alchemy} is two distinct operators. QuickNode's own service and testnet-rpc.monad.xyz are the SAME operator and must never be paired."
+    "Operators: QuickNode and Monad Foundation, from docs.monad.xyz/developer-essentials/testnet (read",
+    "2026-09-23). QuickNode's own service and testnet-rpc.monad.xyz are the SAME operator and must never be",
+    "paired. The Alchemy and dRPC records that stood here are in git history (before 2026-09-27)."
   ],
   "providers": [
     {
       "id": "monad-public",
+      "url": "https://testnet-rpc.monad.xyz/",
       "host": "testnet-rpc.monad.xyz",
-      "urlEnv": "MAKO_RPC_A",
       "operator": "QuickNode",
       "operatorEvidence": "Monad's own testnet documentation names QuickNode as the provider for this endpoint, with archive supported: https://docs.monad.xyz/developer-essentials/testnet (read 2026-09-23). This endpoint is therefore NOT independent of a QuickNode account, and the two must never be counted as a pair.",
-      "credentialed": false,
       "archiveSupport": "Documented by Monad as archive-supported; measured deterministic to 43.6 days (8/8), refused at 50.8 days (0/8), 2026-09-22",
       "finalizedTag": "supported, lag 3 to 4 blocks / 1 second measured 2026-09-22",
       "failureDomain": "QuickNode infrastructure",
@@ -30,45 +29,20 @@
     },
     {
       "id": "monadinfra",
+      "url": "https://rpc-testnet.monadinfra.com/",
       "host": "rpc-testnet.monadinfra.com",
-      "urlEnv": "MAKO_RPC_B",
       "operator": "Monad Foundation",
       "operatorEvidence": "Monad's own testnet documentation names Monad Foundation as the provider for this endpoint, with archive supported: https://docs.monad.xyz/developer-essentials/testnet (read 2026-09-23). 'Monad Infra' is not a separate company; it is a Foundation property.",
-      "credentialed": false,
       "archiveSupport": "INTERMITTENT: measured 5/8, 6/8 and 1/8 at three historical blocks, 2026-09-22. Load balancer over backends with unequal pruning.",
       "finalizedTag": "supported, lag 3 to 4 blocks / 1 second measured 2026-09-22",
       "failureDomain": "Monad Foundation infrastructure",
       "notes": "Agrees byte for byte with the QuickNode endpoint when it answers, including on the mandatory fixture at block 62922075. Measured INTERMITTENT at deeper blocks (5/8, 6/8, 1/8 at 23, 43.6 and 50.8 days, 2026-09-22), so a not-served answer here is ARCHIVE_UNAVAILABLE, never a verification failure. No key and no account required.",
       "rateLimits": "20 rps; batching NOT allowed"
-    },
-    {
-      "id": "alchemy",
-      "host": "monad-testnet.g.alchemy.com",
-      "urlEnv": "MAKO_RPC_ALCHEMY",
-      "operator": "Alchemy Insights, Inc.",
-      "operatorEvidence": "a named company with its own account, quota and billing relationship; the only provider in this project with an established distinct operator",
-      "credentialed": true,
-      "archiveSupport": "CONFIRMED 2026-09-23: served eth_call at block 62922075, 7 days old, byte-identical to the QuickNode endpoint. The 2026-09-21 'monthly capacity exceeded' 429 has cleared.",
-      "finalizedTag": "unmeasured",
-      "failureDomain": "distinct from the public endpoints: separate company, separate account, separate quota",
-      "notes": "Confirmed working 2026-09-23 with Joshua's key on the 'mako markets' app. Requires MAKO_RPC_ALCHEMY to carry the full https:// endpoint. Ticket #23824 for the 2026-09-21 429 is likely closable."
-    },
-    {
-      "id": "drpc",
-      "host": "monad-testnet.drpc.org",
-      "urlEnv": "MAKO_RPC_DRPC",
-      "operator": "unknown",
-      "operatorEvidence": null,
-      "credentialed": false,
-      "archiveSupport": "UNUSABLE: eth_getBlockByNumber unavailable at historical blocks, and eth_call refused with 'user-specified gas exceeds provider limit', measured 2026-09-22 and again 2026-09-23",
-      "finalizedTag": "unmeasured",
-      "failureDomain": "unknown",
-      "notes": "Recorded so it is not retried by a later reader. Free tier cannot serve this workload."
     }
   ],
   "pairPolicy": {
     "twoDistinctOperators": "Both providers must have a non-null 'operator' that is not 'unknown', and the two operators must differ. Only then may evidence carry proofLevel 'two-distinct-operators'.",
-    "oneDomain": "Any other pair. Evidence carries proofLevel 'one-domain', which PROOF_STANDARD.md Version 3 \u00a71b states does not satisfy that section. A run invoked as proof exits non-zero with NOT_INDEPENDENT.",
-    "hostCheck": "The resolved host of each provider's URL must equal the 'host' recorded here for that id, or the run fails. This keeps a key out of the repository while making a swapped endpoint visible to a reviewer."
+    "oneDomain": "Any other pair. Evidence carries proofLevel 'one-domain', which PROOF_STANDARD.md Version 3 §1b states does not satisfy that section. A run invoked as proof exits non-zero with NOT_INDEPENDENT.",
+    "hostCheck": "Each provider's fixed 'url' must parse to exactly the recorded 'host', over https, with a root path and nothing else; the probe refuses any other shape before a request is sent."
   }
 }

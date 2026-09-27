@@ -44,8 +44,8 @@ jobs:
       - name: The secret scan exempts no file and never prints a hit
         run: node script/test-check-no-secrets.mjs
 
-      - name: Archive probe never writes or prints an RPC URL, even when a provider echoes it
-        run: node script/test-probe-redaction.mjs
+      - name: Archive probe proof integrity (fixed keyless urls, no env urls, bounded, classified)
+        run: node script/test-probe-proof.mjs
 
       - name: Archive probe refuses weakened TLS and non-canonical identity strings
         run: node script/test-probe-tls.mjs
@@ -55,21 +55,6 @@ jobs:
 
       - name: Archive probe re-checks trust before every request (delayed and same-size trust-store changes)
         run: node script/test-probe-tls-deferred.mjs
-
-      - name: Archive probe re-checks trust for every spelling of an https URL
-        run: node script/test-probe-tls-deferred-spelling.mjs
-
-      - name: Archive probe output is scrubbed even when Node's own debug logging prints request URLs
-        run: node script/test-probe-debuglog.mjs
-
-      - name: Archive probe leaks nothing through native output (diagnostic reports, V8 regexp tracing)
-        run: node script/test-probe-native-output.mjs
-
-      - name: Archive probe's output wrapper passes bytes through unchanged
-        run: node script/test-probe-stream-wrapper.mjs
-
-      - name: Archive probe wrapper edges (node options, repeated provider, split writes, non-ASCII keys, signals)
-        run: node script/test-probe-wrapper-edges.mjs
 
       - name: Run Forge fmt
         run: forge fmt --check

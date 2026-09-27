@@ -4,7 +4,7 @@
 //   node script/test-probe-tls.mjs          needs `openssl` on PATH; about a minute
 //
 // Same pattern as test-probe-redaction.mjs: the REAL probe runs from a temp copy of the repo against local
-// mock servers, with sentinel credentials. No network, no real credentials, the working tree is not modified.
+// mock servers, each provider at its fixed url in a temp providers.json. No network, the working tree is not modified.
 //
 // OPERATOR cases. The probe's contract: calls are answered only by the configured endpoint over an
 // authenticated channel, and no environment variable may let a different server answer while the evidence
@@ -28,8 +28,6 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
-const SENTINEL_A = 'SENTINELADVAKEYaaaa1111';
-const SENTINEL_B = 'SENTINELADVBKEYbbbb2222';
 
 // ---- honest answers, from the repo's own vendored fixtures ----
 const VERIFIER_CODE = readFileSync(join(REPO, 'test/fixtures/datastreams/verifier-runtime-62922075.hex'), 'utf8').trim();
@@ -102,10 +100,10 @@ function tree() {
   // .invalid hosts can never resolve, so nothing here can reach a real provider.
   writeFileSync(join(dir, 'script/providers.json'), JSON.stringify({
     providers: [
-      { id: 'remote-a', host: 'rpc-a.example.invalid', urlEnv: 'MAKO_RPC_REMOTE_A', operator: 'Remote Operator A', credentialed: true },
-      { id: 'remote-b', host: 'rpc-b.example.invalid', urlEnv: 'MAKO_RPC_REMOTE_B', operator: 'Remote Operator B', credentialed: true },
-      { id: 'mock-a', host: HOST, urlEnv: 'MAKO_RPC_MOCK_A', operator: 'Mock Operator A', credentialed: true },
-      { id: 'mock-b', host: HOST, urlEnv: 'MAKO_RPC_MOCK_B', operator: 'Mock Operator B', credentialed: true },
+      { id: 'remote-a', host: 'rpc-a.example.invalid', url: 'https://rpc-a.example.invalid/', operator: 'Remote Operator A' },
+      { id: 'remote-b', host: 'rpc-b.example.invalid', url: 'https://rpc-b.example.invalid/', operator: 'Remote Operator B' },
+      { id: 'mock-a', host: HOST, url: `http://${HOST}/`, operator: 'Mock Operator A' },
+      { id: 'mock-b', host: HOST, url: `http://${HOST}/`, operator: 'Mock Operator B' },
     ],
   }));
   return dir;
@@ -129,8 +127,7 @@ async function runProbe(env) {
     const runs = existsSync(evDir) ? readdirSync(evDir) : [];
     const resultText = runs.length && existsSync(join(evDir, runs[0], 'RESULT.json')) ? readFileSync(join(evDir, runs[0], 'RESULT.json'), 'utf8') : null;
     const result = resultText ? JSON.parse(resultText) : null;
-    const leaked = [SENTINEL_A, SENTINEL_B].some((s) => (resultText || '').includes(s.slice(0, 10)) || r.out.includes(s.slice(0, 10)));
-    return { code: r.status, out: r.out, result, leaked };
+    return { code: r.status, out: r.out, result };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -139,8 +136,6 @@ async function runProbe(env) {
 const remote = {
   MAKO_PROVIDER_A: 'remote-a',
   MAKO_PROVIDER_B: 'remote-b',
-  MAKO_RPC_REMOTE_A: `https://rpc-a.example.invalid/v2/${SENTINEL_A}`,
-  MAKO_RPC_REMOTE_B: `https://rpc-b.example.invalid/v2/${SENTINEL_B}`,
   HTTPS_PROXY: PROXY,
   NODE_USE_ENV_PROXY: '1',
   MAKO_PROBE_RPC_TIMEOUT_MS: '3000',
@@ -148,19 +143,17 @@ const remote = {
 const mocks = {
   MAKO_PROVIDER_A: 'mock-a',
   MAKO_PROVIDER_B: 'mock-b',
-  MAKO_RPC_MOCK_A: `http://${HOST}/v2/${SENTINEL_A}`,
-  MAKO_RPC_MOCK_B: `http://${HOST}/v2/${SENTINEL_B}`,
 };
 const green = (r) => r.code === 0 && r.result?.status === 'VERIFIED_MATCH';
 // Refused BECAUSE of the weakened TLS setting, not merely "not green" for some other reason.
-const refusedForTls = (r) => r.code === 2 && r.out.includes('TLS certificate checking is weakened') && !r.leaked;
+const refusedForTls = (r) => r.code === 2 && r.out.includes('TLS certificate checking is weakened');
 
 const scenarios = [
   {
     // Harness check: the proxy IS used, and with certificate checks on it cannot answer.
     name: 'CONTROL: through an intercepting proxy with TLS verification on, the impostor cannot answer',
     env: remote,
-    check: (r, t) => t.length > 0 && !green(r) && !r.leaked,
+    check: (r, t) => t.length > 0 && !green(r),
   },
   {
     name: 'OPERATOR: NODE_TLS_REJECT_UNAUTHORIZED=0 must not let a server with an untrusted certificate answer for both operators',
@@ -182,7 +175,7 @@ const scenarios = [
     name: 'CONTROL: typeAndVersion as a real contract encodes it gives VERIFIED_MATCH',
     tv: TV_CANONICAL,
     env: mocks,
-    check: (r) => green(r) && r.result.providers['mock-a'].identity.ok.typeAndVersion === true && !r.leaked,
+    check: (r) => green(r) && r.result.providers['mock-a'].identity.ok.typeAndVersion === true,
   },
   {
     name: 'ABI: typeAndVersion with NON-ZERO padding after the 19 bytes (no contract returns this) is not accepted',
@@ -208,7 +201,7 @@ for (const sc of scenarios) {
   console.log(`  [${ok ? ' ok ' : 'FAIL'}] ${sc.name}`);
   console.log(`         exit ${r.code}, status ${r.result?.status ?? 'none'}, proofLevel ${r.result?.proofLevel ?? 'none'}, ` +
     `operators ${r.result ? Object.values(r.result.providers || {}).map((p) => p.provider?.operator).join(' + ') : 'none'}, ` +
-    `tunnels ${tunnels.length}, leaked ${r.leaked}`);
+    `tunnels ${tunnels.length}`);
 }
 impostor.close(); proxy.close(); local.close();
 rmSync(certDir, { recursive: true, force: true });

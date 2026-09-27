@@ -29,7 +29,7 @@ function clone() {
   const dir = mkdtempSync(join(tmpdir(), 'mako-scan-'));
   execFileSync('git', ['clone', '-q', REPO, dir]);
   // The clone has HEAD; bring over the CURRENT scanner so the test exercises what is about to ship.
-  for (const f of ['script/check-no-secrets.mjs', 'script/test-probe-redaction.mjs']) {
+  for (const f of ['script/check-no-secrets.mjs', 'script/probe-archive.mjs']) {
     copyFileSync(join(REPO, f), join(dir, f));
   }
   return dir;
@@ -44,8 +44,8 @@ const scenarios = [
   { name: 'baseline: the repository as it stands', inject: null, expect: 'pass' },
   { name: 'real-looking Alchemy endpoint in check-no-secrets.mjs (formerly exempt)',
     inject: { file: 'script/check-no-secrets.mjs', value: FAKES.alchemy }, expect: 'fail' },
-  { name: 'real-looking private key in test-probe-redaction.mjs (formerly exempt)',
-    inject: { file: 'script/test-probe-redaction.mjs', value: FAKES.privateKey }, expect: 'fail' },
+  { name: 'real-looking private key in probe-archive.mjs (the file whose output once leaked a key)',
+    inject: { file: 'script/probe-archive.mjs', value: FAKES.privateKey }, expect: 'fail' },
   { name: 'apikey query parameter in a brand-new tracked file',
     inject: { file: 'notes.md', value: FAKES.apikey, add: true }, expect: 'fail' },
   { name: 'a template placeholder (all zeros) is NOT a secret',

@@ -186,9 +186,37 @@ returned as the JSON-RPC error code reached both stdout and evidence. Now:
   variable. The proof pair is QuickNode's and Monad Foundation's public endpoints: two distinct operators,
   no key, `VERIFIED_MATCH` on 2026-09-26. Credentialed endpoints (Alchemy) remain usable for diagnostic
   runs, where all the redaction above still applies. The redaction suite gained a case for the refusal.
-- **Stated limit:** debugging and profiling options that write process memory to FILES (for example
-  `--heapsnapshot-signal`) can contain the URLs held in memory. They are not output or evidence, but such
-  files must never be committed; only the probe's own `evidence/` directory is ever added, by path.
+
+**Reduced to a proof-only probe, 2026-09-27 (Joshua, after Codex diff review round 6).** Round 6 found the
+2026-09-26 decision was not enforced: proof mode refused providers LABELLED credentialed, but still read the
+URLs of the "keyless" ones from environment variables, so `MAKO_RPC_A='https://testnet-rpc.monad.xyz/?apikey=…'`
+put a key into a proof run. It also judged the redaction machinery disproportionate to an optional mode. So:
+- **The probe reads no URL from the environment.** Each provider in `script/providers.json` carries a fixed,
+  public `url`, which must be exactly `https://<recorded host>/` (root path, no query, userinfo or
+  fragment; plain http only to a loopback test server). Alchemy and dRPC left the record.
+- **The secret-handling machinery above is REMOVED** (it stays in git history up to `56d307b`): credential
+  atoms and windows, the evidence guard, stdout/stderr scrubbing and line buffering, signal re-raising,
+  environment deletion, `process.report` exclusion, the Node-option allowlist, `NODE_DEBUG_NATIVE`
+  refusal, and the "shared bytes only" rule. With no secret in the process there is nothing to redact.
+- **Kept, because it protects the PROOF rather than a secret:** https only; trust equal to Node's bundled
+  CA set, at resolution and before every request; no redirects; one deadline per request and a 4 MiB
+  cap; strict decoding; identity values recorded only when equal to their pins; fixed error categories;
+  per-read diagnostics.
+- **Tests:** `test-probe-proof.mjs` (21 cases, in CI) replaces `test-probe-redaction.mjs`. Among them, an
+  ENV case puts decoy URLs in every variable the old probe read (`MAKO_RPC_A`, `_B`, `_ALCHEMY`, `_MOCK_*`)
+  and requires the decoy server to receive NO request; five CONFIG cases refuse a provider url with a
+  query, path, userinfo, fragment or upper-case scheme before any request; and an HONEST case reaches
+  `VERIFIED_MATCH` in both modes. `test-probe-tls.mjs`, `-tls-bypass` and `-tls-deferred` stay, moved to
+  fixed urls. Retired with what they tested: `-redaction`, `-debuglog`, `-native-output`,
+  `-stream-wrapper`, `-wrapper-edges`, `-tls-deferred-spelling` (URL spellings are now refused by the
+  exact-url rule).
+- **Measured 2026-09-27:** `env -i PATH=… node script/probe-archive.mjs --as-proof` (an EMPTY environment)
+  gave `VERIFIED_MATCH`, two distinct operators, twice; a first attempt was `ARCHIVE_UNAVAILABLE` because
+  Monad Foundation did not serve `eth_getCode` at the pinned block five times running, its recorded
+  intermittency, which the per-read diagnostics named directly.
+- A credentialed endpoint is checked by hand with `mako-design/scripts/check-alchemy-key.sh`, which prints
+  only HTTP status and writes no evidence.
+
 - **A failed identity read says which read and why.** Evidence records each unserved read's attempts as
   categories and HTTP status. On 2026-09-26 a new key pasted with a trailing ` \` from an example
   command failed every call with 401, and the record said only "not served".
@@ -380,7 +408,7 @@ and checksummed rather than fetched on demand.
 | Verifier identity | chain id 10143, `VerifierProxy 2.0.0`, 7,009 bytes, `s_feeManager` 0, `s_accessController` 0, on both |
 | Verifier code | runtime sha256 `246be742ffcc522f72309f1f42c77817af4d6f823969ce9e5763f2a9327ca231`, **GATED**: a mismatch is `VERIFICATION_MISMATCH`. Tied to `SPEC.md:78`'s keccak256 by computing both from the same bytes on both operators |
 | Evidence | `evidence/archive-probe-2026-09-24T19-10-24-255Z/RESULT.json`, the first run that gates on the code hash; the 2026-09-23 runs checked length only |
-| Command | `MAKO_RPC_A=… MAKO_RPC_B=… node script/probe-archive.mjs --as-proof` |
+| Command | `node script/probe-archive.mjs --as-proof` (since 2026-09-27 the URLs are fixed in `providers.json`; no environment variables) |
 
 **The code-hash gate is proven to fail**, not only to pass: run with a wrong pinned hash, both
 providers report `DOES NOT MATCH THE PIN` and the probe exits 3 with `VERIFICATION_MISMATCH`.
@@ -685,10 +713,8 @@ node script/rule-reference.mjs
 node script/mutate-reference.mjs
 node script/mutate-solidity.mjs
 
-# Type B1, network, no credentials
-MAKO_RPC_A=https://testnet-rpc.monad.xyz/ \
-MAKO_RPC_B=https://rpc-testnet.monadinfra.com \
-  node script/probe-archive.mjs --as-proof
+# Type B1, network, no credentials, no environment needed
+env -i PATH="$PATH" node script/probe-archive.mjs --as-proof
 
 # Type B2, network, no credentials; run once per operator
 MAKO_FORK_RPC=https://testnet-rpc.monad.xyz/     forge test --network monad --match-contract RoundSettlementFork -vvv
