@@ -235,7 +235,7 @@ The launcher was deleted, and:
   code they choose to run.
 - **A direct `--as-proof` run refuses any environment beyond** `PATH`, `MAKO_PROVIDER_A/B` (ids) and
   `MAKO_PROBE_RPC_TIMEOUT_MS`, naming the extra variables and never their values, before anything else.
-- **Tests (in `test-probe-proof.mjs`, 25 cases):** PROOF-ENV (a proof run from a shell holding an old
+- **Tests (in `test-probe-proof.mjs`; its final line reports the current count, 26 of 26 at `546b527`):** PROOF-ENV (a proof run from a shell holding an old
   credential variable refuses, names it, prints the exact command above, prints no value, sends no
   request); COMMAND (the documented command spawned as the operator's shell spawns it, from an environment
   holding a sentinel credential, a `BASH_ENV` hook that would leave a marker file, and a report-enabling
