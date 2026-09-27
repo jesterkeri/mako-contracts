@@ -9,10 +9,13 @@
 // (test/fixtures/datastreams/verifier-runtime-62922075.hex, sha256-checked) and the real verify return from
 // the pinned B1 record, so an honest run is a genuine VERIFIED_MATCH.
 //
-// Codex round 7: a proof run must also START from a stripped environment (script/run-proof.sh), because Node
-// inherits the caller's whole environment before the probe runs. The LAUNCHER cases read the running Node
-// process's real environment from /proc and send it the report signal; the PROOF-ENV case shows a direct
-// --as-proof run from a dirty environment refuses.
+// Codex rounds 7 and 8: a proof run must START from a stripped environment, and the strip must happen before
+// ANY interpreter starts, since each runs its own inherited hook first (BASH_ENV, NODE_OPTIONS). So the
+// documented command begins with `env -i`, run by the operator's own interactive shell. The COMMAND cases
+// spawn `env` exactly as that shell does, from a dirty environment holding a sentinel credential, a
+// BASH_ENV hook that would leave a marker, and a report-enabling NODE_OPTIONS; they read the running Node
+// process's real environment from /proc and send it the report signal. The PROOF-ENV case shows any other
+// --as-proof run refuses, and the DOCS case pins the command text in the probe and VERIFICATION.md.
 //
 // It replaces test-probe-redaction.mjs and four other redaction tests, retired with the redaction they
 // tested (in git history up to 56d307b). Codex diff review round 6's regression is the ENV case below: URLs
@@ -22,6 +25,15 @@
 
 import { mkdtempSync, cpSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 const SENTINEL = 'SENTINELinheritedKEYzzzz9999';
+// A dirty caller environment: an old credential, a BASH_ENV hook that would leave a marker if ANY Bash
+// started from it ran, and NODE_OPTIONS that would make Node print a diagnostic report on SIGUSR2.
+const HOOK_DIR = mkdtempSync(join(tmpdir(), 'mako-hook-'));
+const HOOK_MARKER = join(HOOK_DIR, 'hook-ran');
+writeFileSync(join(HOOK_DIR, 'hook.sh'), `printf '%s' "$MAKO_RPC_ALCHEMY" > '${HOOK_MARKER}'\n`);
+const DIRTY = {
+  MAKO_RPC_ALCHEMY: `https://example.invalid/v2/${SENTINEL}`, OTHER_SECRET: SENTINEL,
+  BASH_ENV: join(HOOK_DIR, 'hook.sh'), NODE_OPTIONS: '--report-on-signal --report-filename=stdout',
+};
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
@@ -116,7 +128,7 @@ function tree(providers) {
   writeFileSync(join(dir, 'script/providers.json'), JSON.stringify({ providers }));
   return dir;
 }
-// The official ids, pointing at the mocks: the launcher passes no MAKO_PROVIDER_* so the defaults apply.
+// The official ids, pointing at the mocks: the documented command passes no MAKO_PROVIDER_*, so the defaults apply.
 const officialIds = () => honestProviders({ a: { id: 'monad-public' }, b: { id: 'monadinfra' } });
 const honestProviders = (over = {}) => [
   { id: 'mock-a', url: `http://${A.host}/`, host: A.host, operator: 'Mock Operator A', ...over.a },
@@ -124,21 +136,26 @@ const honestProviders = (over = {}) => [
 ];
 
 const RUN_BUDGET_MS = 120_000;
-async function runProbe({ providers = honestProviders(), args = [], env = {}, launcher = false, during = null } = {}) {
+const PROOF_COMMAND = 'env -i PATH="$(dirname "$(command -v node)")" node script/probe-archive.mjs --as-proof';
+const NODE_DIR = dirname(process.execPath);
+async function runProbe({ providers = honestProviders(), args = [], env = {}, documented = false, during = null } = {}) {
   const dir = tree(providers);
   const started = Date.now();
   try {
     const r = await new Promise((resolve) => {
       // A MINIMAL environment: only PATH, the provider SELECTION (ids), and what the case adds. With
-      // `launcher`, the official script/run-proof.sh is run instead, from exactly the environment given.
-      const child = launcher
-        ? spawn('bash', [join(dir, 'script/run-proof.sh')], { env: { PATH: process.env.PATH, ...env } })
+      // `documented`, the PROOF_COMMAND is run as the operator's shell runs it: `env -i PATH=<node dir> node
+      // script/probe-archive.mjs --as-proof`, spawned from exactly the (dirty) environment given.
+      const child = documented
+        // stdin is /dev/null, NOT Node's default socket pipe: Bash skips BASH_ENV when stdin is a socket (it
+        // assumes a remote shell), which would make a no-hook result vacuous. Measured 2026-09-27.
+        ? spawn('env', ['-i', `PATH=${NODE_DIR}`, 'node', 'script/probe-archive.mjs', '--as-proof'], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH, ...env } })
         : spawn(process.execPath, [join(dir, 'script/probe-archive.mjs'), ...args], {
           env: { PATH: process.env.PATH, MAKO_PROVIDER_A: 'mock-a', MAKO_PROVIDER_B: 'mock-b', ...env },
         });
       const kill = setTimeout(() => child.kill('SIGKILL'), RUN_BUDGET_MS);
       let out = '', seen = null;
-      // `during` runs while the process is alive: the launcher `exec`s, so this pid IS the Node process.
+      // `during` runs while the process is alive: `env` execs node, so this pid IS the Node process.
       if (during) setTimeout(() => { try { seen = during(child); } catch (e) { seen = { error: e.message }; } }, 300);
       child.stdout.on('data', (d) => (out += d));
       child.stderr.on('data', (d) => (out += d));
@@ -175,19 +192,17 @@ const cases = [
   // ---- a proof run starts from a stripped environment (Codex round 7) ----
   ['PROOF-ENV: a direct --as-proof run from an environment holding an old credential variable refuses, naming it only',
     { args: ['--as-proof'], env: { MAKO_RPC_ALCHEMY: `https://example.invalid/v2/${SENTINEL}` } },
-    (r) => r.code === 2 && r.out.includes('MAKO_RPC_ALCHEMY') && r.out.includes('run-proof.sh') && !r.out.includes(SENTINEL)
+    (r) => r.code === 2 && r.out.includes('MAKO_RPC_ALCHEMY') && r.out.includes(PROOF_COMMAND) && !r.out.includes(SENTINEL)
       && r.result === null && A.requests === 0 && B.requests === 0],
-  ['LAUNCHER: run-proof.sh from a dirty shell: the live Node process holds ONLY PATH, and the proof goes green',
-    { launcher: true, providers: officialIds(), modes: { a: 'slow', b: 'slow' },
-      env: { MAKO_RPC_ALCHEMY: `https://example.invalid/v2/${SENTINEL}`, NODE_OPTIONS: '--report-on-signal --report-filename=stdout', OTHER_SECRET: SENTINEL },
+  ['COMMAND: the documented command from a dirty shell: no hook runs, the live Node process holds ONLY PATH, the proof goes green',
+    { documented: true, providers: officialIds(), modes: { a: 'slow', b: 'slow' }, env: DIRTY,
       during: (child) => readFileSync(`/proc/${child.pid}/environ`, 'latin1').split('\0').filter(Boolean) },
     (r) => Array.isArray(r.seen) && r.seen.length === 1 && r.seen[0].startsWith('PATH=') && !r.seen.join('\n').includes(SENTINEL)
-      && r.code === 0 && status(r) === 'VERIFIED_MATCH' && r.result.mode === 'proof' && !r.out.includes(SENTINEL)],
-  ['LAUNCHER: the report signal from a dirty shell produces no report and no credential (NODE_OPTIONS never reaches Node)',
-    { launcher: true, providers: officialIds(), modes: { a: 'slow', b: 'slow' },
-      env: { MAKO_RPC_ALCHEMY: `https://example.invalid/v2/${SENTINEL}`, NODE_OPTIONS: '--report-on-signal --report-filename=stdout' },
+      && !existsSync(HOOK_MARKER) && r.code === 0 && status(r) === 'VERIFIED_MATCH' && r.result.mode === 'proof' && !r.out.includes(SENTINEL)],
+  ['COMMAND: the report signal to that process produces no report and no credential (NODE_OPTIONS never reaches Node)',
+    { documented: true, providers: officialIds(), modes: { a: 'slow', b: 'slow' }, env: DIRTY,
       during: (child) => child.kill('SIGUSR2') },
-    (r) => r.signal === 'SIGUSR2' && !r.out.includes(SENTINEL) && !r.out.includes('"header"')],
+    (r) => r.signal === 'SIGUSR2' && !r.out.includes(SENTINEL) && !r.out.includes('"header"') && !existsSync(HOOK_MARKER)],
   // ---- answers that must not go green ----
   ['MISMATCH: providers returning different verify bytes', { modes: { b: 'different-verify' } },
     (r) => r.code === 3 && status(r) === 'VERIFICATION_MISMATCH' && r.result.bytesIdentical === false],
@@ -242,6 +257,28 @@ for (const [name, opts, check] of cases) {
   console.log(`         exit ${r.code}, status ${status(r) ?? 'none'}, ${r.ms} ms, requests A=${A.requests} B=${B.requests} decoy=${DECOY.requests}`);
 }
 
+// CONTROL for the COMMAND cases: a Bash started from the SAME dirty environment does run the BASH_ENV hook
+// (and so would have read the credential), so the COMMAND case's "no hook ran" is a real result. This is the
+// round-8 hazard that removed the Bash launcher.
+{
+  const { spawnSync } = await import('node:child_process');
+  rmSync(HOOK_MARKER, { force: true });
+  spawnSync('bash', ['-c', 'true'], { stdio: 'ignore', env: { PATH: process.env.PATH, ...DIRTY } });
+  const ran = existsSync(HOOK_MARKER) && readFileSync(HOOK_MARKER, 'utf8').includes(SENTINEL);
+  rmSync(HOOK_MARKER, { force: true });
+  if (!ran) bad++;
+  console.log(`  [${ran ? ' ok ' : 'FAIL'}] CONTROL: a Bash started from the dirty environment runs the BASH_ENV hook and reads the credential`);
+}
+
+// DOCS: the command the probe tells an operator to run, and the one VERIFICATION.md gives, are this exact one.
+{
+  const probe = readFileSync(join(REPO, 'script/probe-archive.mjs'), 'utf8');
+  const record = readFileSync(join(REPO, 'test/fixtures/datastreams/VERIFICATION.md'), 'utf8');
+  const ok = probe.includes(`const PROOF_COMMAND = '${PROOF_COMMAND}';`) && record.includes(PROOF_COMMAND) && !record.includes('bash script/run-proof.sh');
+  if (!ok) bad++;
+  console.log(`  [${ok ? ' ok ' : 'FAIL'}] DOCS: the probe and VERIFICATION.md give exactly the documented env -i command, and no Bash launcher`);
+}
+
 // The repository's own record: each fixed url is exactly https://<host>/, and the two operators differ.
 {
   const real = JSON.parse(readFileSync(join(REPO, 'script/providers.json'), 'utf8')).providers;
@@ -253,5 +290,6 @@ for (const [name, opts, check] of cases) {
 }
 
 for (const m of [A, B, DECOY]) m.server.close();
-console.log(`\n  ${cases.length + 1 - bad} of ${cases.length + 1} cases behaved as required.`);
+rmSync(HOOK_DIR, { recursive: true, force: true });
+console.log(`\n  ${cases.length + 3 - bad} of ${cases.length + 3} cases behaved as required.`);
 process.exit(bad ? 1 : 0);

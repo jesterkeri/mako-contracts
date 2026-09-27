@@ -47,18 +47,22 @@ const REPO = join(HERE, '..');
 const AS_PROOF = process.argv.includes('--as-proof');
 
 // A PROOF run starts from a stripped environment, and refuses otherwise, before anything else happens.
-// Codex diff review round 7: the probe reads no URL from the environment, but Node INHERITS the whole
-// environment before this file runs, so a credential left in the caller's shell (e.g. an old
-// MAKO_RPC_ALCHEMY) sat in the proof process, where a native diagnostic report could print it. JavaScript
-// cannot remove what was inherited before it ran, so the guarantee lives in the launcher,
-// script/run-proof.sh, which starts Node under `env -i` with PATH only. This check makes a direct
-// `--as-proof` run from any other environment refuse, naming the extra variables but never their values.
+// Codex diff review round 7: Node INHERITS the caller's whole environment before this file runs, so a
+// credential left in a shell (an old MAKO_RPC_ALCHEMY) sat in the proof process, where a native diagnostic
+// report could print it. Round 8: a Bash launcher cannot fix that either, because Bash runs the inherited
+// BASH_ENV hook before its first line, and every interpreter has such a hook (NODE_OPTIONS, BASH_ENV,
+// LD_PRELOAD). So the clean environment must exist BEFORE the first interpreter starts: the documented
+// proof command itself begins with `env -i` (PROOF_COMMAND below). This check makes any other --as-proof
+// run refuse, naming the extra variables but never their values. What runs before `env -i` is the
+// operator's own shell and the `env` binary: that is the trust root, out of scope like any code the
+// operator chooses to run.
+const PROOF_COMMAND = 'env -i PATH="$(dirname "$(command -v node)")" node script/probe-archive.mjs --as-proof';
 if (AS_PROOF) {
   const allowed = new Set(['PATH', 'MAKO_PROVIDER_A', 'MAKO_PROVIDER_B', 'MAKO_PROBE_RPC_TIMEOUT_MS']);
   const extra = Object.keys(process.env).filter((k) => !allowed.has(k)).sort();
   if (extra.length) {
     process.stderr.write(`REFUSING TO RUN A PROOF: the environment carries ${extra.length} variable(s) a proof does not use `
-      + `(${extra.join(', ')}). Run the proof with script/run-proof.sh, which starts it from a stripped environment.\n`);
+      + `(${extra.join(', ')}). Run the proof from a stripped environment, exactly:\n  ${PROOF_COMMAND}\n`);
     process.exit(2);
   }
 }
