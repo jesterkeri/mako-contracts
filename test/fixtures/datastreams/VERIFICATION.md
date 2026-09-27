@@ -217,6 +217,29 @@ put a key into a proof run. It also judged the redaction machinery disproportion
 - A credentialed endpoint is checked by hand with `mako-design/scripts/check-alchemy-key.sh`, which prints
   only HTTP status and writes no evidence.
 
+**A proof starts from a stripped environment (Codex diff review round 7, 2026-09-27).** Reading no URL from
+the environment did not make the proof process secret-free: Node inherits the caller's whole environment
+before the probe runs, so an old `MAKO_RPC_ALCHEMY` left in a shell sat in the proof process, where a
+native diagnostic report (`NODE_OPTIONS=--report-on-signal`) could print it. JavaScript cannot remove what
+was inherited before it ran, so the guarantee is the launcher's:
+- **`script/run-proof.sh` is the official proof command.** It `exec`s Node under `env -i` with `PATH` set to
+  the directory holding `node`, and nothing else: no inherited variable, no `NODE_OPTIONS`.
+- **A direct `--as-proof` run refuses any environment beyond** `PATH`, `MAKO_PROVIDER_A/B` (ids) and
+  `MAKO_PROBE_RPC_TIMEOUT_MS`, naming the extra variables and never their values, before anything else.
+- **Tests (in `test-probe-proof.mjs`, now 24 cases):** PROOF-ENV (a direct proof from a shell holding an
+  old credential variable refuses, names it, prints no value, sends no request); LAUNCHER (run-proof.sh
+  from a shell holding a sentinel credential and a report-enabling `NODE_OPTIONS`: the running Node
+  process's real environment, read from `/proc/<pid>/environ`, holds ONLY `PATH`, and the proof goes
+  green); LAUNCHER-SIGNAL (the report signal to that process produces no report and no sentinel).
+  Against `ce84efb` exactly these three fail; with `env -i` removed from the launcher, both LAUNCHER
+  cases fail. The earlier ENV case now runs in diagnostic mode, since a proof run refuses such variables.
+- **Measured 2026-09-27, afternoon:** through the launcher, QuickNode served every read but Monad
+  Foundation answered `eth_getCode` and one `eth_call` at block 62922075 (11.3 days old) with "Block
+  requested not found", on four runs in a row, and on direct `curl` and Node requests alike, where the
+  same calls had been served that morning. That is the endpoint's recorded intermittency, and the probe
+  classifies it as `ARCHIVE_UNAVAILABLE`, naming the read. It is also a warning: the mandatory fixture's
+  block is moving out of one operator's archive, which the re-baselining procedure (§1) exists for.
+
 - **A failed identity read says which read and why.** Evidence records each unserved read's attempts as
   categories and HTTP status. On 2026-09-26 a new key pasted with a trailing ` \` from an example
   command failed every call with 401, and the record said only "not served".
@@ -408,7 +431,7 @@ and checksummed rather than fetched on demand.
 | Verifier identity | chain id 10143, `VerifierProxy 2.0.0`, 7,009 bytes, `s_feeManager` 0, `s_accessController` 0, on both |
 | Verifier code | runtime sha256 `246be742ffcc522f72309f1f42c77817af4d6f823969ce9e5763f2a9327ca231`, **GATED**: a mismatch is `VERIFICATION_MISMATCH`. Tied to `SPEC.md:78`'s keccak256 by computing both from the same bytes on both operators |
 | Evidence | `evidence/archive-probe-2026-09-24T19-10-24-255Z/RESULT.json`, the first run that gates on the code hash; the 2026-09-23 runs checked length only |
-| Command | `node script/probe-archive.mjs --as-proof` (since 2026-09-27 the URLs are fixed in `providers.json`; no environment variables) |
+| Command | `bash script/run-proof.sh` (since 2026-09-27: fixed URLs in `providers.json`, and Node started from a stripped environment) |
 
 **The code-hash gate is proven to fail**, not only to pass: run with a wrong pinned hash, both
 providers report `DOES NOT MATCH THE PIN` and the probe exits 3 with `VERIFICATION_MISMATCH`.
@@ -713,8 +736,8 @@ node script/rule-reference.mjs
 node script/mutate-reference.mjs
 node script/mutate-solidity.mjs
 
-# Type B1, network, no credentials, no environment needed
-env -i PATH="$PATH" node script/probe-archive.mjs --as-proof
+# Type B1, network, no credentials; the launcher strips the environment itself
+bash script/run-proof.sh
 
 # Type B2, network, no credentials; run once per operator
 MAKO_FORK_RPC=https://testnet-rpc.monad.xyz/     forge test --network monad --match-contract RoundSettlementFork -vvv

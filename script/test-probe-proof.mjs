@@ -9,6 +9,11 @@
 // (test/fixtures/datastreams/verifier-runtime-62922075.hex, sha256-checked) and the real verify return from
 // the pinned B1 record, so an honest run is a genuine VERIFIED_MATCH.
 //
+// Codex round 7: a proof run must also START from a stripped environment (script/run-proof.sh), because Node
+// inherits the caller's whole environment before the probe runs. The LAUNCHER cases read the running Node
+// process's real environment from /proc and send it the report signal; the PROOF-ENV case shows a direct
+// --as-proof run from a dirty environment refuses.
+//
 // It replaces test-probe-redaction.mjs and four other redaction tests, retired with the redaction they
 // tested (in git history up to 56d307b). Codex diff review round 6's regression is the ENV case below: URLs
 // placed in every environment variable the old probe read must receive no request at all.
@@ -16,6 +21,7 @@
 // The TLS tests (test-probe-tls*.mjs) cover who can answer over https; this file covers everything else.
 
 import { mkdtempSync, cpSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
+const SENTINEL = 'SENTINELinheritedKEYzzzz9999';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
@@ -48,7 +54,9 @@ function mock() {
       const { id, method, params } = JSON.parse(body);
       const data = String(params?.[0]?.data || '');
       const isVerify = method === 'eth_call' && data.startsWith('0xf7e83aee');
-      const ok = (result) => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ jsonrpc: '2.0', id, result })); };
+      // 'slow' is honest with every answer 400 ms late, so a run lasts well past the 300 ms inspection point.
+      const later = (f) => (m.mode === 'slow' ? setTimeout(f, 400) : f());
+      const ok = (result) => later(() => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ jsonrpc: '2.0', id, result })); });
       const fail = (code, message) => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ jsonrpc: '2.0', id, error: { code, message } })); };
       switch (m.mode) {
         case 'drip':
@@ -108,26 +116,33 @@ function tree(providers) {
   writeFileSync(join(dir, 'script/providers.json'), JSON.stringify({ providers }));
   return dir;
 }
+// The official ids, pointing at the mocks: the launcher passes no MAKO_PROVIDER_* so the defaults apply.
+const officialIds = () => honestProviders({ a: { id: 'monad-public' }, b: { id: 'monadinfra' } });
 const honestProviders = (over = {}) => [
   { id: 'mock-a', url: `http://${A.host}/`, host: A.host, operator: 'Mock Operator A', ...over.a },
   { id: 'mock-b', url: `http://${B.host}/`, host: B.host, operator: 'Mock Operator B', ...over.b },
 ];
 
 const RUN_BUDGET_MS = 120_000;
-async function runProbe({ providers = honestProviders(), args = [], env = {} } = {}) {
+async function runProbe({ providers = honestProviders(), args = [], env = {}, launcher = false, during = null } = {}) {
   const dir = tree(providers);
   const started = Date.now();
   try {
     const r = await new Promise((resolve) => {
-      // A MINIMAL environment: only PATH, the provider SELECTION (ids), and what the case adds.
-      const child = spawn(process.execPath, [join(dir, 'script/probe-archive.mjs'), ...args], {
-        env: { PATH: process.env.PATH, MAKO_PROVIDER_A: 'mock-a', MAKO_PROVIDER_B: 'mock-b', ...env },
-      });
+      // A MINIMAL environment: only PATH, the provider SELECTION (ids), and what the case adds. With
+      // `launcher`, the official script/run-proof.sh is run instead, from exactly the environment given.
+      const child = launcher
+        ? spawn('bash', [join(dir, 'script/run-proof.sh')], { env: { PATH: process.env.PATH, ...env } })
+        : spawn(process.execPath, [join(dir, 'script/probe-archive.mjs'), ...args], {
+          env: { PATH: process.env.PATH, MAKO_PROVIDER_A: 'mock-a', MAKO_PROVIDER_B: 'mock-b', ...env },
+        });
       const kill = setTimeout(() => child.kill('SIGKILL'), RUN_BUDGET_MS);
-      let out = '';
+      let out = '', seen = null;
+      // `during` runs while the process is alive: the launcher `exec`s, so this pid IS the Node process.
+      if (during) setTimeout(() => { try { seen = during(child); } catch (e) { seen = { error: e.message }; } }, 300);
       child.stdout.on('data', (d) => (out += d));
       child.stderr.on('data', (d) => (out += d));
-      child.on('close', (code) => { clearTimeout(kill); resolve({ code, out }); });
+      child.on('close', (code, signal) => { clearTimeout(kill); resolve({ code, signal, out, seen }); });
     });
     const evDir = join(dir, 'test/fixtures/datastreams/evidence');
     const runs = existsSync(evDir) ? readdirSync(evDir) : [];
@@ -152,10 +167,27 @@ const cases = [
   ['PROOF: one operator behind both providers is NOT_INDEPENDENT, exit 4',
     { args: ['--as-proof'], providers: honestProviders({ b: { operator: 'Mock Operator A' } }) },
     (r) => r.code === 4 && r.result.proofLevel === 'one-domain'],
-  // ---- ENV: no URL is ever taken from the environment (Codex round 6) ----
+  // ---- ENV: no URL is ever taken from the environment (Codex round 6); a diagnostic run, since a proof
+  //      run refuses any such variable outright (next case) ----
   ['ENV: URLs in every variable the old probe read are ignored; the decoy gets no request',
-    { args: ['--as-proof'], env: { MAKO_RPC_A: `http://${DECOY.host}/?apikey=secret`, MAKO_RPC_B: `http://${DECOY.host}/`, MAKO_RPC_ALCHEMY: `http://${DECOY.host}/v2/key`, MAKO_RPC_MOCK_A: `http://${DECOY.host}/`, MAKO_RPC_MOCK_B: `http://${DECOY.host}/` } },
+    { env: { MAKO_RPC_A: `http://${DECOY.host}/?apikey=secret`, MAKO_RPC_B: `http://${DECOY.host}/`, MAKO_RPC_ALCHEMY: `http://${DECOY.host}/v2/key`, MAKO_RPC_MOCK_A: `http://${DECOY.host}/`, MAKO_RPC_MOCK_B: `http://${DECOY.host}/` } },
     (r) => r.code === 0 && status(r) === 'VERIFIED_MATCH' && DECOY.requests === 0],
+  // ---- a proof run starts from a stripped environment (Codex round 7) ----
+  ['PROOF-ENV: a direct --as-proof run from an environment holding an old credential variable refuses, naming it only',
+    { args: ['--as-proof'], env: { MAKO_RPC_ALCHEMY: `https://example.invalid/v2/${SENTINEL}` } },
+    (r) => r.code === 2 && r.out.includes('MAKO_RPC_ALCHEMY') && r.out.includes('run-proof.sh') && !r.out.includes(SENTINEL)
+      && r.result === null && A.requests === 0 && B.requests === 0],
+  ['LAUNCHER: run-proof.sh from a dirty shell: the live Node process holds ONLY PATH, and the proof goes green',
+    { launcher: true, providers: officialIds(), modes: { a: 'slow', b: 'slow' },
+      env: { MAKO_RPC_ALCHEMY: `https://example.invalid/v2/${SENTINEL}`, NODE_OPTIONS: '--report-on-signal --report-filename=stdout', OTHER_SECRET: SENTINEL },
+      during: (child) => readFileSync(`/proc/${child.pid}/environ`, 'latin1').split('\0').filter(Boolean) },
+    (r) => Array.isArray(r.seen) && r.seen.length === 1 && r.seen[0].startsWith('PATH=') && !r.seen.join('\n').includes(SENTINEL)
+      && r.code === 0 && status(r) === 'VERIFIED_MATCH' && r.result.mode === 'proof' && !r.out.includes(SENTINEL)],
+  ['LAUNCHER: the report signal from a dirty shell produces no report and no credential (NODE_OPTIONS never reaches Node)',
+    { launcher: true, providers: officialIds(), modes: { a: 'slow', b: 'slow' },
+      env: { MAKO_RPC_ALCHEMY: `https://example.invalid/v2/${SENTINEL}`, NODE_OPTIONS: '--report-on-signal --report-filename=stdout' },
+      during: (child) => child.kill('SIGUSR2') },
+    (r) => r.signal === 'SIGUSR2' && !r.out.includes(SENTINEL) && !r.out.includes('"header"')],
   // ---- answers that must not go green ----
   ['MISMATCH: providers returning different verify bytes', { modes: { b: 'different-verify' } },
     (r) => r.code === 3 && status(r) === 'VERIFICATION_MISMATCH' && r.result.bytesIdentical === false],
