@@ -27,10 +27,11 @@ const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const EXPECTED = ['N1', 'N1b', 'N1c', 'N2', 'N3', 'N5', 'N6', 'N7', 'N8', 'N9', 'N10', 'N11', 'N12', 'N13', 'N14',
   'N16', 'N17', 'N18', 'N19', 'N22', 'N25', 'N26', 'N27'];
 
-// The suites that test MakoRoundsV1 and RoundSettlement. The fork suite skips offline, so its tests count as
-// evidence but not as CI evidence.
+// The suites that test MakoRoundsV1, RoundSettlement and the rounds deploy script. Fork tests skip offline, so
+// they count as evidence but not as CI evidence: every test in the fork suite, and every test named
+// `test_Fork...` in any other suite (DeployRoundsV1.t.sol mixes offline and fork tests).
 const SUITES = ['test/MakoRoundsV1.t.sol', 'test/Adversary.t.sol', 'test/InvariantGaps.t.sol', 'test/InvariantGaps2.t.sol', 'test/RoundSettlement.t.sol',
-  'test/RuleCorpus.t.sol', 'test/RoundSettlementFork.t.sol'];
+  'test/RuleCorpus.t.sol', 'test/RoundSettlementFork.t.sol', 'test/DeployRoundsV1.t.sol'];
 const FORK_SUITE = 'test/RoundSettlementFork.t.sol';
 
 // Which KIND of evidence may stand for which invariant. A corpus row is evidence only for the report rule
@@ -100,7 +101,7 @@ for (const [id, e] of Object.entries(map.invariants)) {
     if (!(SCRIPT_FOR[id] || []).includes(p)) problems.push(`${id}: ${p} is not a check for this invariant`);
     if (!ranInCi(p)) problems.push(`${id}: ${p} is not run by CI`);
   }
-  const ciTests = t.filter((n) => tests.has(n) && tests.get(n) !== FORK_SUITE);
+  const ciTests = t.filter((n) => tests.has(n) && tests.get(n) !== FORK_SUITE && !n.startsWith('test_Fork'));
   const runsInCi = ciTests.length > 0 || (CORPUS_FOR.has(id) && r.some((x) => rows.has(x)))
     || s.some((p) => (SCRIPT_FOR[id] || []).includes(p) && ranInCi(p));
   if (!runsInCi && !e.deferred) problems.push(`${id}: no evidence that runs in CI (fork tests skip offline) and no deferral`);

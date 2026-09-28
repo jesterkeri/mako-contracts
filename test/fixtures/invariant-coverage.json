@@ -160,9 +160,19 @@
       ]
     },
     "N16": {
+      "tests": [
+        "test_ScriptPinsTheSameVerifierAndFeedAsTheLibrary",
+        "test_RefusesAVerifierWithoutThePinnedCode",
+        "test_ForkPinnedContractsMatchTheLiveChain",
+        "test_ForkRefusesAVerifierWithOtherCode",
+        "test_ForkRefusesAFeeManager",
+        "test_ForkRefusesAnAccessController",
+        "test_ForkRefusesAnotherVerifierVersion"
+      ],
+      "note": "script/DeployRoundsV1.s.sol refuses to deploy unless VERIFIER_PROXY (the same address as the library constant, asserted offline) has the pinned code hash, version, and zero fee manager and access controller; the positive and tampered cases need the real chain and run only in the fork half. The forwarder half is vacuous for this keeper-only bytecode, which takes no forwarder; the CRE redeploy must add the real-KeystoneForwarder assertion.",
       "deferred": {
-        "owner": "T1.5",
-        "reason": "a deploy-script assertion; no deploy script exists until T1.5 deploys to testnet"
+        "owner": "T0.1b (CRE redeploy)",
+        "reason": "the \"never names MockKeystoneForwarder\" half applies only once onReport and a forwarder parameter exist; the keeper-only deployment names no forwarder"
       }
     },
     "N17": {
@@ -215,12 +225,12 @@
         "test_MalformedReturnTokenReverts",
         "test_NoReturnTokenIsAccepted",
         "test_StrayTransfersAreNeverCredited",
-        "test_OutboundTransferReturningFalseReverts"
-      ],
-      "deferred": {
-        "owner": "T1.5",
-        "reason": "the deployed USDC address and code-hash assertion is a deploy-script check; no deploy script exists until T1.5"
-      }
+        "test_OutboundTransferReturningFalseReverts",
+        "test_RefusesUsdcWithoutThePinnedCode",
+        "test_ChainCheckIncludesTheUsdcCheck",
+        "test_ReadBackRefusesAnotherUsdc",
+        "test_ForkPinnedContractsMatchTheLiveChain"
+      ]
     },
     "N25": {
       "tests": [

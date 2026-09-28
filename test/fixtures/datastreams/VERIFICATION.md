@@ -651,6 +651,31 @@ copied. Turning `via_ir` or the optimizer off fails with "stack too deep", so it
 copies only those files and runs `MAKO_MUTATION_JOBS` mutants at once (default 4). CI runs the sweep as
 its own job on pull requests and on manual dispatch; every other gate still runs on every push.
 
+
+### T1.5: the rounds deploy script (2026-09-28)
+
+`script/DeployRoundsV1.s.sol` deploys `MakoRoundsV1` **keeper-only**: this bytecode has `settle` and no
+`onReport`, so it takes no forwarder (Joshua, 2026-09-28: keeper first, CRE as a later redeploy). It never
+reads a private key; the sender comes from `forge script --account`. Without `--broadcast` it is a dry run.
+
+Before anything is broadcast it refuses: any chain but 10143; a `USDC` whose code hash is not SPEC §4's
+(N22); a `VERIFIER_PROXY` whose code hash, `typeAndVersion`, fee manager or access controller differ from
+SPEC §4 (N16); an empty creator list, a zero creator or a repeated one (it sorts, since the constructor
+needs strictly ascending order). `forge script` simulates the whole of `run()` first, so the read-back after
+the simulated deploy also stops it before any transaction: treasury, USDC, `CREATORS_HASH`, every creator,
+`roundCount == 0`, and `MAX_ACTIVE_ROUNDS == ROUNDS_EXPECTED_CAP`, which makes the operator state the cap
+T0.1c chose. A broadcast writes the PREFLIGHT deployment receipt to `deployments/`.
+
+Evidence, `test/DeployRoundsV1.t.sol`: 16 offline tests (every refusal by its exact error) and 6 fork
+tests. Run 2026-09-28 against the live chain at block 66397947 and later:
+`MAKO_FORK_RPC=https://testnet-rpc.monad.xyz/ forge test --network monad --match-contract DeployRoundsV1`,
+**22 passed**, including the full dry run, so the pinned USDC and verifier values still match the chain.
+
+`check-invariants.mjs` now counts a test named `test_Fork...` in any suite as not running in CI, and was
+shown to reject a map whose only N22 evidence is a fork test. N22 is no longer deferred. N16's
+"never names `MockKeystoneForwarder`" half is deferred to the CRE redeploy, since this deployment names no
+forwarder at all.
+
 ---
 
 ## §4 Mutation testing
