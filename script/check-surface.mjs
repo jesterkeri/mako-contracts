@@ -50,6 +50,41 @@ if (forbidden.length) problems.push(`functions whose names imply forbidden autho
 if (hasFallback) problems.push('a fallback or receive function exists, so native value could arrive');
 for (const s of SPONSORED) if (!writers.includes(s)) problems.push(`sponsored selector ${s} does not exist`);
 
+// N7 beyond "no setter". The second adversary pass on T1.4 turned MAX_ACTIVE_ROUNDS into a storage variable
+// written inside `schedule`: no setter function existed, so the ABI checks passed. So, from the compiled
+// contract and its source:
+//   (a) the storage layout must equal this allowlist EXACTLY, so a SPEC §4 value moved into storage adds a
+//       slot and fails;
+//   (b) every SPEC §4 value must be declared `constant` or `immutable`, which the compiler then enforces;
+//   (c) the creator set, the one §4 value that must live in storage (Solidity has no immutable mapping), may
+//       be written only inside the constructor.
+if (!process.argv[2]) {
+  const STORAGE = [
+    '_isCreator:t_mapping(t_address,t_bool)', '_stakes', 'treasuryBalance:t_uint256', '_stakeClaimed:t_mapping(t_uint256,t_mapping(t_address,t_bool))',
+    '_creatorFeeClaimed:t_mapping(t_uint256,t_bool)', '_lock:t_uint256', '_rounds', 'roundCount:t_uint256', '_activeIds:t_array(t_uint256)dyn_storage',
+    '_activePos:t_mapping(t_uint256,t_uint256)', 'creatorActiveRound:t_mapping(t_address,t_uint256)',
+  ];
+  const layout = JSON.parse(execFileSync('forge', ['inspect', 'MakoRoundsV1', 'storageLayout', '--json'], { encoding: 'utf8' })).storage
+    .map((x) => (x.label === '_stakes' || x.label === '_rounds' ? x.label : `${x.label}:${x.type}`));
+  const extraSlots = layout.filter((x) => !STORAGE.includes(x));
+  const missingSlots = STORAGE.filter((x) => !layout.includes(x));
+  if (extraSlots.length) problems.push(`storage not on the allowlist (a SPEC §4 value in storage can be changed): ${extraSlots.join(', ')}`);
+  if (missingSlots.length) problems.push(`allowlisted storage missing: ${missingSlots.join(', ')}`);
+
+  const src = readFileSync('src/MakoRoundsV1.sol', 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  const lib = readFileSync('src/RoundSettlement.sol', 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  const SPEC4 = [['ENTRY_LEAD', src], ['BOUNDARY_STEP', src], ['DURATION', src], ['MIN_LEAD', src], ['MAX_LEAD', src], ['SUBMIT_WINDOW', src],
+    ['MAX_ACTIVE_ROUNDS', src], ['MIN_ENTRY', src], ['PROTOCOL_FEE_BPS', src], ['CREATOR_FEE_BPS', src], ['TREASURY', src], ['USDC', src],
+    ['CREATORS_HASH', src], ['VERIFIER_PROXY', lib], ['FEED_ID', lib], ['MAX_SPREAD_BPS', lib]];
+  for (const [name, code] of SPEC4) {
+    const decl = new RegExp(`\\b(?:constant|immutable)\\b[^;=]*\\b${name}\\b\\s*[;=]`);
+    if (!decl.test(code)) problems.push(`SPEC §4 value ${name} is not declared constant or immutable`);
+  }
+  const ctor = src.match(/constructor\s*\([^)]*\)[^{]*\{([\s\S]*?)\n    \}/);
+  const outside = ctor ? src.replace(ctor[0], '') : src;
+  if (/_isCreator\s*\[[^\]]*\]\s*=(?!=)/.test(outside)) problems.push('the creator set (_isCreator) is written outside the constructor');
+}
+
 // N10 at the SOURCE, since the ABI shows no modifiers: no pause-like identifier may appear in the contract or
 // its library, comments removed. Added at T1.4 after the adversary pointed out that a `whenNotPaused`
 // modifier on an allowed writer would pass the ABI checks above. What this still cannot see is a gate under
@@ -72,4 +107,5 @@ if (problems.length) {
   for (const p of problems) console.error(`  - ${p}`);
   process.exit(1);
 }
-console.log('\n  N7: no setter exists for any value.  N10: no pause function in the ABI and no pause-like identifier in the source.');
+console.log('\n  N7: no setter, every SPEC §4 value constant or immutable, storage exactly the allowlist, creator set written only in the constructor.');
+console.log('  N10: no pause function in the ABI and no pause-like identifier in the source.');

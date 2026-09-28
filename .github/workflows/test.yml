@@ -84,5 +84,30 @@ jobs:
       - name: External surface is exactly the allowlist (N7 no setters, N10 no pause)
         run: node script/check-surface.mjs
 
-      - name: Every SPEC 5.2 clause is load-bearing (shipping library)
+  # The Solidity mutation sweep compiles the contract once per mutant under via_ir, which cannot be turned
+  # off (stack too deep), so it is the slow gate. It runs on pull requests (before anything reaches main) and
+  # on demand, not on every push; every other gate above still runs on every push.
+  mutation:
+    name: Solidity mutation sweep
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Every mutated clause is load-bearing (shipping library and MakoRoundsV1)
+        env:
+          MAKO_MUTATION_JOBS: 3
         run: node script/mutate-solidity.mjs

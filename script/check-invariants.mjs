@@ -11,7 +11,9 @@
 //     rounds and settlement SUITES below (not merely any .sol file);
 //   - every corpus row exists in test/fixtures/rule-cases/CASES.json, and every script exists.
 // The adversary pass on T1.4 showed the first version accepting a test name that existed only in a comment,
-// a test from another contract's suite, and an invariant deleted from both lists at once. It proves the map
+// a test from another contract's suite, and an invariant deleted from both lists at once. The second pass
+// showed the next version accepting ANY corpus row or ANY existing script as CI evidence for any invariant,
+// and a test declared in an abstract contract that forge never runs; hence the kind rules below. It proves the map
 // points at real evidence; that each test can FAIL for its invariant is script/mutate-solidity.mjs's job.
 
 import { readFileSync, existsSync } from 'node:fs';
@@ -27,20 +29,35 @@ const EXPECTED = ['N1', 'N1b', 'N1c', 'N2', 'N3', 'N5', 'N6', 'N7', 'N8', 'N9', 
 
 // The suites that test MakoRoundsV1 and RoundSettlement. The fork suite skips offline, so its tests count as
 // evidence but not as CI evidence.
-const SUITES = ['test/MakoRoundsV1.t.sol', 'test/Adversary.t.sol', 'test/InvariantGaps.t.sol', 'test/RoundSettlement.t.sol',
+const SUITES = ['test/MakoRoundsV1.t.sol', 'test/Adversary.t.sol', 'test/InvariantGaps.t.sol', 'test/InvariantGaps2.t.sol', 'test/RoundSettlement.t.sol',
   'test/RuleCorpus.t.sol', 'test/RoundSettlementFork.t.sol'];
 const FORK_SUITE = 'test/RoundSettlementFork.t.sol';
+
+// Which KIND of evidence may stand for which invariant. A corpus row is evidence only for the report rule
+// (N1, N11); a script only where it is that invariant's named check, and only if CI runs it.
+const CORPUS_FOR = new Set(['N1', 'N11']);
+const SCRIPT_FOR = { N1c: ['script/check-surface.mjs'], N7: ['script/check-surface.mjs'], N10: ['script/check-surface.mjs'] };
+const workflow = readFileSync(join(REPO, '.github/workflows/test.yml'), 'utf8');
+const ranInCi = (p) => new RegExp(`run:\\s*node\\s+${p.replace(/[.]/g, '\\.')}\\b`).test(workflow);
 
 const map = JSON.parse(readFileSync(join(REPO, 'test/fixtures/invariant-coverage.json'), 'utf8'));
 const corpus = JSON.parse(readFileSync(join(REPO, 'test/fixtures/rule-cases/CASES.json'), 'utf8'));
 const problems = [];
 
 // ---- the tests that really exist ----
-const stripComments = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+// Comments and string literals removed, then only CONCRETE contracts: a test in an abstract contract never runs.
+const clean = (src) => src.replace(/"(?:[^"\\\n]|\\.)*"/g, '""').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
 const tests = new Map(); // name -> suite
 for (const f of SUITES) {
-  const code = stripComments(readFileSync(join(REPO, f), 'utf8'));
-  for (const m of code.matchAll(/function\s+(test[A-Za-z0-9_]*)\s*\([^)]*\)\s*(?:public|external)\b/g)) tests.set(m[1], f);
+  const code = clean(readFileSync(join(REPO, f), 'utf8'));
+  // Each declaration runs to the next one. One match per declaration, so "abstract contract X" is never
+  // split into an "abstract" part and a concrete-looking "contract X" part (the first version did exactly that).
+  const decls = [...code.matchAll(/\b(abstract\s+)?(contract|library|interface)\s+[A-Za-z0-9_]+/g)];
+  decls.forEach((d, i) => {
+    if (d[1] || d[2] !== 'contract') return;
+    const body = code.slice(d.index, i + 1 < decls.length ? decls[i + 1].index : code.length);
+    for (const m of body.matchAll(/function\s+(test[A-Za-z0-9_]*)\s*\([^)]*\)\s*(?:public|external)\b/g)) tests.set(m[1], f);
+  });
 }
 const rows = new Set(corpus.cases.map((c) => c.id));
 
@@ -49,7 +66,7 @@ const ids = Object.keys(map.invariants);
 for (const id of EXPECTED) if (!ids.includes(id)) problems.push(`${id}: expected but has no entry`);
 for (const id of ids) if (!EXPECTED.includes(id)) problems.push(`${id}: has an entry but is not an expected invariant`);
 const design = join(REPO, '..', 'mako-design', 'blueprint', 'INVARIANTS.md');
-let designNote = 'INVARIANTS.md not checked out beside this repository; checked against the pinned list only';
+let designNote = 'INVARIANTS.md is not checked out beside this repository (as in CI), so the pinned list was NOT compared with it; run locally to compare';
 if (existsSync(design)) {
   const text = readFileSync(design, 'utf8');
   const section = text.split(/^## /m).find((s) => s.startsWith('Enforced by the contract')) || '';
@@ -72,9 +89,20 @@ for (const [id, e] of Object.entries(map.invariants)) {
     testRefs++;
     if (!tests.has(name)) problems.push(`${id}: ${name} is not a public test function in the rounds and settlement suites`);
   }
-  for (const row of r) { rowRefs++; if (!rows.has(row)) problems.push(`${id}: corpus row ${row} does not exist in CASES.json`); }
-  for (const p of s) { scriptRefs++; if (!existsSync(join(REPO, p))) problems.push(`${id}: script ${p} does not exist`); }
-  const runsInCi = t.some((n) => tests.has(n) && tests.get(n) !== FORK_SUITE) || r.length > 0 || s.length > 0;
+  for (const row of r) {
+    rowRefs++;
+    if (!rows.has(row)) problems.push(`${id}: corpus row ${row} does not exist in CASES.json`);
+    if (!CORPUS_FOR.has(id)) problems.push(`${id}: a corpus row is evidence only for the report rule (N1, N11)`);
+  }
+  for (const p of s) {
+    scriptRefs++;
+    if (!existsSync(join(REPO, p))) problems.push(`${id}: script ${p} does not exist`);
+    if (!(SCRIPT_FOR[id] || []).includes(p)) problems.push(`${id}: ${p} is not a check for this invariant`);
+    if (!ranInCi(p)) problems.push(`${id}: ${p} is not run by CI`);
+  }
+  const ciTests = t.filter((n) => tests.has(n) && tests.get(n) !== FORK_SUITE);
+  const runsInCi = ciTests.length > 0 || (CORPUS_FOR.has(id) && r.some((x) => rows.has(x)))
+    || s.some((p) => (SCRIPT_FOR[id] || []).includes(p) && ranInCi(p));
   if (!runsInCi && !e.deferred) problems.push(`${id}: no evidence that runs in CI (fork tests skip offline) and no deferral`);
 }
 

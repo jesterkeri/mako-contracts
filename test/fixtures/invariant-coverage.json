@@ -4,8 +4,8 @@
     "script/check-invariants.mjs, in CI, fails unless these entries are exactly its pinned invariant list (and,",
     "where the design repository is checked out alongside, exactly INVARIANTS.md's table), every named test is a",
     "real public test function in the rounds and settlement suites, every corpus row and script exists, every",
-    "invariant has evidence that runs in CI or a deferral naming its owner. That each test can FAIL for its",
-    "invariant is proved by script/mutate-solidity.mjs. Courier-side invariants (N15, N20, N21, N24) are proved",
+    "invariant has evidence that runs in CI or a deferral naming its owner. The mutation sweep proves that the",
+    "mutants it LISTS are killed; two adversary passes found 20 more that the suite missed, so it is evidence, not proof, that nothing else survives. Courier-side invariants (N15, N20, N21, N24) are proved",
     "outside this repository (T2.0, T0.1b)."
   ],
   "source": "mako-design/blueprint/INVARIANTS.md, revision r8 (2026-09-18), table 'Enforced by the contract'",
@@ -67,7 +67,8 @@
       "tests": [
         "test_OneSidedRefundsWithoutPrice",
         "test_OneSidedRoundCannotSettle",
-        "test_PendingSettlementExcludesOneSidedRounds"
+        "test_PendingSettlementExcludesOneSidedRounds",
+        "test_DownOnlyRoundCannotSettle"
       ]
     },
     "N5": {
@@ -85,7 +86,7 @@
       "scripts": [
         "script/check-surface.mjs"
       ],
-      "note": "test_NoSetters is check-surface.mjs: the ABI equals an allowlist of six writers, none a setter."
+      "note": "check-surface.mjs: the external ABI has no setter; every SPEC \u00a74 value is declared constant or immutable; the storage layout equals an exact allowlist, so a \u00a74 value moved into storage fails; and the creator set, the one \u00a74 value that must live in storage, is written only in the constructor. The last three were added after the second T1.4 adversary pass turned MAX_ACTIVE_ROUNDS into a storage variable written inside schedule and passed the old ABI-only check."
     },
     "N8": {
       "tests": [
@@ -104,7 +105,8 @@
         "test_TieRefunds",
         "test_OutcomeUpWhenCloseIsHigher",
         "test_OutcomeDownWhenCloseIsLower",
-        "test_EqualPricesRefundAsTie"
+        "test_EqualPricesRefundAsTie",
+        "test_OutcomeIsDecidedByPriceNotByBidOrAsk"
       ]
     },
     "N10": {
@@ -153,7 +155,8 @@
       "tests": [
         "test_SettlementEmitsEvidence",
         "test_TieEmitsEvidenceWithoutClaimingToBeSettled",
-        "test_TieEmitsItsSettlementEvidence"
+        "test_TieEmitsItsSettlementEvidence",
+        "test_OutcomeIsDecidedByPriceNotByBidOrAsk"
       ]
     },
     "N16": {
@@ -169,9 +172,11 @@
         "test_RemainderWaitsForTheLastWinner",
         "test_ConservationRefund",
         "test_ARefundChargesNoFees",
-        "testFuzz_CrossRoundSolvencyDrainsToZero"
+        "testFuzz_CrossRoundSolvencyDrainsToZero",
+        "test_DownWinnersArePaidAndTheRemainderIsSwept",
+        "test_FeesAreFlooredAndTakenOnTheSmallerSideWhicheverItIs"
       ],
-      "note": "test_ConservationSettled is testFuzz_ConservationSettled; test_RemainderOnLastClaim is test_RemainderWaitsForTheLastWinner; test_ConservationRefund covers each refund reason (added at T1.4)."
+      "note": "test_ConservationSettled is testFuzz_ConservationSettled; test_RemainderOnLastClaim is test_RemainderWaitsForTheLastWinner; test_ConservationRefund covers each refund reason (added at T1.4). Until the second T1.4 adversary pass every claim test settled UP; test_DownWinnersArePaidAndTheRemainderIsSwept claims on a DOWN win, and test_FeesAreFlooredAndTakenOnTheSmallerSideWhicheverItIs checks the fee formula against independent values with DOWN the smaller side."
     },
     "N18": {
       "tests": [
@@ -182,7 +187,8 @@
         "test_OneNonTerminalRoundPerCreator",
         "test_GlobalActiveRoundCapIsEnforced",
         "test_SettlingFreesBothTheGlobalAndTheCreatorSlot",
-        "test_StartTimeMustFitAUint32ReportTimestamp"
+        "test_StartTimeMustFitAUint32ReportTimestamp",
+        "test_PublishedRoundTimesMatchTheSchedule"
       ],
       "note": "MAX_LEAD had no test until test_MaxLeadAtTheBoundary; test_LeadBoundsAreEnforcedAtTheBoundaryPlusMinusOne steps by a minute despite its name, so test_MinLeadAtOneSecond pins MIN_LEAD at one second either side. Both added after the T1.4 adversary pass."
     },
@@ -194,7 +200,9 @@
         "test_TreasuryOnly",
         "test_RefundRecordsNoCreatorFee",
         "test_FeesFollowTheSpecFormula",
-        "test_AnotherCreatorCannotTakeThisRoundsFee"
+        "test_AnotherCreatorCannotTakeThisRoundsFee",
+        "test_DownWinnersArePaidAndTheRemainderIsSwept",
+        "test_FeesAreFlooredAndTakenOnTheSmallerSideWhicheverItIs"
       ],
       "note": "test_AnotherCreatorCannotTakeThisRoundsFee (added after the T1.4 adversary pass) claims as a second invited creator; before it, no test did, and a mutant paying the fee to any creator survived the suite."
     },
@@ -206,7 +214,8 @@
         "test_RevertingTokenReverts",
         "test_MalformedReturnTokenReverts",
         "test_NoReturnTokenIsAccepted",
-        "test_StrayTransfersAreNeverCredited"
+        "test_StrayTransfersAreNeverCredited",
+        "test_OutboundTransferReturningFalseReverts"
       ],
       "deferred": {
         "owner": "T1.5",

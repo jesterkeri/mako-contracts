@@ -605,10 +605,51 @@ test from another contract's suite, and an invariant deleted from both lists at 
   `whenNotPaused` modifier. A gate under an innocent name inside one of the six allowed writers is still
   left to review, and the map says so.
 
-**Mutation result: 72 killed, 0 not killed**, including the two refund mutants and the five above.
-`test/fixtures/invariant-coverage.json` maps all 23 contract-enforced invariants. N16 and N22's
-deploy-script halves are deferred to T1.5, by name. The map proves the evidence exists; the sweep proves
-the evidence can fail.
+After that pass the sweep stood at 72 killed, 0 not killed, including the two refund mutants and the five
+above.
+
+**A second adversary pass (2026-09-28) found 15 more surviving mutants.** Each broke a clause the map
+claimed was covered:
+- DOWN wins were never exercised end to end: paying every UP stake, paying DOWN from the wrong pool,
+  counting the wrong side as winners, never counting DOWN (N17);
+- a DOWN-only round settling, or being listed as pending (N3, SPEC 5.1);
+- the creator fee taken on the UP pool instead of the smaller side, and either fee rounded up (SPEC 7);
+- an outbound transfer returning `false` being ignored (N22);
+- `closeTimeOf`, `submitDeadlineOf` and the `RoundScheduled` event publishing the wrong times (N18,
+  SPEC 4);
+- the library returning the bid or ask as the price (N9, N14).
+
+It also showed the checker accepting a corpus row or any existing script as CI evidence for any invariant,
+and a test declared in an abstract contract that forge never runs. Adopted in response:
+- **`test/InvariantGaps2.t.sol`**, six tests:
+  - `test_DownWinnersArePaidAndTheRemainderIsSwept`;
+  - `test_DownOnlyRoundCannotSettle`;
+  - `test_OutcomeIsDecidedByPriceNotByBidOrAsk`;
+  - `test_FeesAreFlooredAndTakenOnTheSmallerSideWhicheverItIs`;
+  - `test_PublishedRoundTimesMatchTheSchedule`;
+  - `test_OutboundTransferReturningFalseReverts`, with a `FalseOnPayoutUSDC` mock.
+
+  All 15 mutants are in `script/mutate-solidity.mjs`.
+- **The checker's kind rules:** a corpus row counts only for the report rule (N1, N11); a script counts
+  only where it is that invariant's named check (N1c, N7, N10: `check-surface.mjs`) and CI runs it. Only
+  tests in concrete contracts count.
+- **N7 by storage, not only by ABI:** `script/check-surface.mjs` now requires the storage layout of
+  `MakoRoundsV1` (`forge inspect ... storageLayout`) to be exactly the allowlisted variables, every
+  SPEC 4 parameter to be declared `constant` or `immutable`, and `_isCreator` to be written only in the
+  constructor. Shown to fail on an added storage variable, a parameter made mutable, and a creator write
+  outside the constructor.
+
+**Mutation result: 87 killed, 0 not killed.** Run 2026-09-28 with `node script/mutate-solidity.mjs` in
+865 s wall (4 mutants in parallel on a 22-core machine). `test/fixtures/invariant-coverage.json` maps all
+23 contract-enforced invariants. N16 and N22's deploy-script halves are deferred to T1.5, by name. The map
+proves the evidence exists. The sweep proves the evidence can fail **for the listed mutants only**; a
+clause no mutant touches is not proven by it.
+
+**Why the sweep no longer runs on every push.** Each mutant is a full `via_ir` compile. Measured on
+2026-09-28: 121 s with the whole repository, 61 s with only the rounds and settlement sources and suites
+copied. Turning `via_ir` or the optimizer off fails with "stack too deep", so it stays. The runner now
+copies only those files and runs `MAKO_MUTATION_JOBS` mutants at once (default 4). CI runs the sweep as
+its own job on pull requests and on manual dispatch; every other gate still runs on every push.
 
 ---
 

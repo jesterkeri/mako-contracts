@@ -10,9 +10,17 @@
 // in the working tree is never edited and `git checkout` is never used, per the standing rule about
 // undoing uncommitted work. The copy is 1.3 MB of lib/ plus source, which is cheap enough to do per
 // mutation and removes any chance of leaving a mutated file behind.
+//
+// SPEED (2026-09-28). A via_ir compile of the whole repository takes about 120 s, and the old sweep ran one
+// per mutant, in series, so 87 mutants took well over an hour, in CI on every push too. via_ir cannot be
+// dropped (without it, or without the optimizer, the contract fails with "stack too deep"). So:
+//   - each copy holds only what these mutants are tested by: the rounds and settlement sources and suites,
+//     not the old market contracts, their tests or the deploy scripts (measured: 121 s -> 61 s a compile);
+//   - mutants run MAKO_MUTATION_JOBS at a time (default 4: each via_ir compile wants 1-2 GB of memory).
+// Results print in the catalogue's order whatever order they finish in.
 
 import { mkdtempSync, writeFileSync, readFileSync, cpSync, rmSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -372,6 +380,112 @@ const MUTATIONS = [
     from: '            _creatorFeeClaimed[roundId] = true;',
     to: '            // mutated: creator fee flag removed',
   },
+  // ---- found by the SECOND adversary pass on T1.4: each survived the whole suite until test/InvariantGaps2.t.sol ----
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest|InvariantGapsTest|InvariantGaps2Test',
+    name: 'rounds: every UP stake wins, whatever the outcome',
+    clause: 'N17/SPEC 7 losers receive nothing',
+    from: '} else if (stake.side == (r.outcome == Outcome.Up ? Side.Up : Side.Down)) {',
+    to: '} else if (stake.side == Side.Up) {',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest|InvariantGapsTest|InvariantGaps2Test',
+    name: 'rounds: pay DOWN winners against the UP pool',
+    clause: 'N17 payout share',
+    from: 'uint256 winningPool = r.outcome == Outcome.Up ? r.upPool : r.downPool;',
+    to: 'uint256 winningPool = r.upPool;',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest|InvariantGapsTest|InvariantGaps2Test',
+    name: 'rounds: count UP entrants as the winners on a DOWN win',
+    clause: 'N17 remainder swept by the last winner',
+    from: 'uint32 winners = r.outcome == Outcome.Up ? r.upEntrants : r.downEntrants;',
+    to: 'uint32 winners = r.upEntrants;',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest|InvariantGapsTest|InvariantGaps2Test',
+    name: 'rounds: never count DOWN entrants',
+    clause: 'N17 remainder swept by the last winner',
+    from: '            else r.downEntrants++;',
+    to: '            else r.downEntrants += 0;',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest|InvariantGapsTest|InvariantGaps2Test',
+    name: 'rounds: settle a round with an empty UP side',
+    clause: 'N3',
+    from: 'if (r.upPool == 0 || r.downPool == 0) revert RoundIsOneSided();',
+    to: 'if (r.downPool == 0) revert RoundIsOneSided();',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest|InvariantGapsTest|InvariantGaps2Test',
+    name: 'rounds: list a round with an empty UP side as pending',
+    clause: 'SPEC 5.1 pendingSettlement',
+    from: 'SUBMIT_WINDOW && r.upPool != 0',
+    to: 'SUBMIT_WINDOW',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest|InvariantGapsTest|InvariantGaps2Test',
+    name: 'rounds: creator fee on the UP pool, not the smaller',
+    clause: 'SPEC 7 creator fee formula',
+    from: 'uint256 smaller = r.upPool < r.downPool ? r.upPool : r.downPool;',
+    to: 'uint256 smaller = r.upPool;',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest|InvariantGapsTest|InvariantGaps2Test',
+    name: 'rounds: protocol fee rounded up',
+    clause: 'SPEC 7 floor',
+    from: 'uint256 protocolFee = (total * PROTOCOL_FEE_BPS) / 10_000;',
+    to: 'uint256 protocolFee = (total * PROTOCOL_FEE_BPS + 9_999) / 10_000;',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest|InvariantGapsTest|InvariantGaps2Test',
+    name: 'rounds: creator fee rounded up',
+    clause: 'SPEC 7 floor',
+    from: 'uint256 creatorFee = (smaller * CREATOR_FEE_BPS) / 10_000;',
+    to: 'uint256 creatorFee = (smaller * CREATOR_FEE_BPS + 9_999) / 10_000;',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest|InvariantGapsTest|InvariantGaps2Test',
+    name: 'rounds: ignore a false return on an outbound transfer',
+    clause: 'N22 outbound',
+    from: '        if (data.length != 0 && (data.length != 32 || !abi.decode(data, (bool)))) revert TransferFailed(); // outbound',
+    to: '        // mutated: outbound return check removed',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest|InvariantGapsTest|InvariantGaps2Test',
+    name: 'rounds: closeTimeOf a minute late',
+    clause: 'N18 closeTime = startTime + DURATION',
+    from: '        return _existing(roundId).startTime + DURATION;',
+    to: '        return _existing(roundId).startTime + DURATION + 60;',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest|InvariantGapsTest|InvariantGaps2Test',
+    name: 'rounds: submitDeadlineOf an hour early',
+    clause: 'SPEC 4 submitDeadline',
+    from: '        return _existing(roundId).startTime + DURATION + SUBMIT_WINDOW;',
+    to: '        return _existing(roundId).startTime + DURATION + SUBMIT_WINDOW - 3600;',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest|InvariantGapsTest|InvariantGaps2Test',
+    name: 'rounds: RoundScheduled publishes closeTime a minute late',
+    clause: 'N18, couriers read the event',
+    from: '            startTime + DURATION,\n            startTime + DURATION + SUBMIT_WINDOW\n        );',
+    to: '            startTime + DURATION + 60,\n            startTime + DURATION + SUBMIT_WINDOW\n        );',
+  },
+  {
+    file: 'src/RoundSettlement.sol', match: 'RoundSettlementTest|MakoRoundsV1Test|AdversaryTest|InvariantGapsTest|InvariantGaps2Test',
+    name: 'library: report the bid as the price',
+    clause: 'N9, N14',
+    from: '            price: price,',
+    to: '            price: bid,',
+  },
+  {
+    file: 'src/RoundSettlement.sol', match: 'RoundSettlementTest|MakoRoundsV1Test|AdversaryTest|InvariantGapsTest|InvariantGaps2Test',
+    name: 'library: report the ask as the price',
+    clause: 'N9, N14',
+    from: '            price: price,',
+    to: '            price: ask,',
+  },
   // ---- found by the adversary pass on T1.4: each survived the whole suite until test/InvariantGaps.t.sol ----
   {
     file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest|InvariantGapsTest',
@@ -558,53 +672,76 @@ function sourceOf(rel) {
 let notKilled = 0;
 const results = [];
 
-console.log(`Mutation run: ${MUTATIONS.length} mutations\n`);
+// Only the files these mutants compile against. The old market contracts, their suites and the deploy
+// scripts are left out: nothing here tests them, and they were half of every compile.
+const COPY_SRC = ['src/MakoRoundsV1.sol', 'src/RoundSettlement.sol', 'src/interfaces'];
+const COPY_TEST = ['test/MakoRoundsV1.t.sol', 'test/MakoRoundsV1Harness.sol', 'test/Adversary.t.sol', 'test/InvariantGaps.t.sol',
+  'test/InvariantGaps2.t.sol', 'test/RoundSettlement.t.sol', 'test/RoundSettlementHarness.sol', 'test/RuleCorpus.t.sol',
+  'test/RoundSettlementFork.t.sol', 'test/mocks', 'test/fixtures'];
+const JOBS = Math.max(1, Number(process.env.MAKO_MUTATION_JOBS) || 4);
 
-for (const m of MUTATIONS) {
+console.log(`Mutation run: ${MUTATIONS.length} mutations, ${JOBS} at a time\n`);
+
+function forgeTest(dir, match) {
+  return new Promise((resolve) => {
+    execFile('forge', ['test', '--root', dir, '--match-contract', match], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+      (err, stdout, stderr) => resolve({ failed: !!err, out: (stdout || '') + (stderr || '') }));
+  });
+}
+
+async function runOne(m) {
   const rel = m.file || DEFAULT_REL;
   const match = m.match || DEFAULT_MATCH;
   const original = sourceOf(rel);
   const count = original.split(m.from).length - 1;
-  if (count !== 1) {
-    console.log(`  [SKIP] ${m.name}`);
-    console.log(`         anchor matched ${count} times, expected exactly 1. NOT APPLIED, so the clause is UNPROVEN.`);
-    results.push({ name: m.name, status: 'ANCHOR_STALE', matched: count });
-    notKilled++;
-    continue;
-  }
+  if (count !== 1) return { m, status: 'ANCHOR_STALE', count };
 
   const dir = mkdtempSync(join(tmpdir(), 'mako-sol-mut-'));
   try {
-    for (const p of ['src', 'test', 'lib', 'foundry.toml', 'remappings.txt']) {
+    for (const p of [...COPY_SRC, ...COPY_TEST, 'lib', 'foundry.toml', 'remappings.txt']) {
       try { cpSync(join(REPO, p), join(dir, p), { recursive: true }); } catch {}
     }
     writeFileSync(join(dir, rel), original.replace(m.from, m.to));
-
-    let out = '', failed = false, compileError = false;
-    try {
-      out = execFileSync('forge', ['test', '--root', dir, '--match-contract', match], {
-        encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      out = (e.stdout || '') + (e.stderr || '');
-      failed = true;
-    }
-    compileError = /Compiler run failed|Error \(\d+\)/.test(out);
-
+    const { failed, out } = await forgeTest(dir, match);
+    const compileError = /Compiler run failed|Error \(\d+\)/.test(out);
     // A mutation that will not compile is still killed: the defect cannot ship. It is reported
     // separately so it is not mistaken for a test catching it at runtime.
     const status = compileError ? 'KILLED_AT_COMPILE' : failed ? 'KILLED' : 'SURVIVED';
-    if (status === 'SURVIVED') notKilled++;
-
-    const failing = [...out.matchAll(/\[FAIL[^\]]*\]\s+(\w+)/g)].map((x) => x[1]);
-    console.log(`  [${status === 'SURVIVED' ? 'FAIL' : ' ok '}] ${m.name}`);
-    console.log(`         ${m.clause}   ${status}${failing.length ? `  via ${[...new Set(failing)].join(', ')}` : ''}`);
-    if (m.note && status === 'SURVIVED') console.log(`         note: ${m.note}`);
-    results.push({ name: m.name, clause: m.clause, status, failing: [...new Set(failing)] });
+    const failing = [...new Set([...out.matchAll(/\[FAIL[^\]]*\]\s+(\w+)/g)].map((x) => x[1]))];
+    return { m, status, failing };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+// A small pool: JOBS mutants in flight, each result stored at its catalogue index.
+const outcomes = new Array(MUTATIONS.length);
+let next = 0;
+async function worker() {
+  while (next < MUTATIONS.length) {
+    const i = next++;
+    outcomes[i] = await runOne(MUTATIONS[i]);
+  }
+}
+const started = Date.now();
+await Promise.all(Array.from({ length: Math.min(JOBS, MUTATIONS.length) }, worker));
+
+for (const o of outcomes) {
+  const { m } = o;
+  if (o.status === 'ANCHOR_STALE') {
+    console.log(`  [SKIP] ${m.name}`);
+    console.log(`         anchor matched ${o.count} times, expected exactly 1. NOT APPLIED, so the clause is UNPROVEN.`);
+    results.push({ name: m.name, status: 'ANCHOR_STALE', matched: o.count });
+    notKilled++;
+    continue;
+  }
+  if (o.status === 'SURVIVED') notKilled++;
+  console.log(`  [${o.status === 'SURVIVED' ? 'FAIL' : ' ok '}] ${m.name}`);
+  console.log(`         ${m.clause}   ${o.status}${o.failing.length ? `  via ${o.failing.join(', ')}` : ''}`);
+  if (m.note && o.status === 'SURVIVED') console.log(`         note: ${m.note}`);
+  results.push({ name: m.name, clause: m.clause, status: o.status, failing: o.failing });
+}
+console.log(`\n  ${MUTATIONS.length} mutations in ${Math.round((Date.now() - started) / 1000)} s`);
 
 // The working tree must be untouched. Asserted rather than assumed, for every file touched.
 for (const [rel, before] of sources) {
