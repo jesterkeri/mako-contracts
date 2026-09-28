@@ -2,7 +2,6 @@
 pragma solidity ^0.8.24;
 
 import {Script, console} from "forge-std/Script.sol";
-import {VmSafe} from "forge-std/Vm.sol";
 import {MakoRoundsV1} from "../src/MakoRoundsV1.sol";
 import {RoundSettlement} from "../src/RoundSettlement.sol";
 import {IVerifierProxy} from "../src/interfaces/IVerifierProxy.sol";
@@ -32,8 +31,19 @@ import {IVerifierProxy} from "../src/interfaces/IVerifierProxy.sol";
 ///             forge script script/DeployRoundsV1.s.sol --rpc-url monad_testnet --account <keystore>
 ///             (add --broadcast only when Joshua has said to deploy; without it this is a dry run)
 ///
-///         On a broadcast it writes `deployments/rounds-v1-<chainid>-<address>.json`, the deployment receipt
-///         PREFLIGHT asks for. A dry run prints the same fields and writes nothing.
+///         `run()` writes NO receipt, dry run or broadcast: forge executes `run()` before it sends anything,
+///         so a receipt written there would claim a deployment even when the transaction then failed. Once
+///         the deployment transaction has landed, the receipt comes from the chain itself:
+///
+///           forge script script/DeployRoundsV1.s.sol --rpc-url monad_testnet \
+///             --sig "verifyDeployment(address)" <deployed address>
+///
+///         which re-runs every check against the deployed contract and writes
+///         `deployments/rounds-v1-<chainid>-<address>.json`, the deployment receipt PREFLIGHT asks for.
+///
+///         Addresses are accepted only in exact EIP-55 checksummed form. TREASURY and CREATORS are
+///         immutable with no setter, so a one-digit typo would otherwise send every fee, or a creator slot,
+///         to an address nobody controls, permanently (adversary pass, 2026-09-28).
 contract DeployRoundsV1 is Script {
     uint256 public constant MONAD_TESTNET = 10143;
 
@@ -59,6 +69,39 @@ contract DeployRoundsV1 is Script {
     error DuplicateCreator(address creator);
     error ZeroTreasury();
     error ReadBackMismatch(string field);
+    error NotChecksummed(string input);
+
+    /// An address exactly as EIP-55 writes it, surrounding spaces aside. All-lowercase is refused too: it
+    /// carries no checksum, so it cannot catch a typo in an immutable address.
+    function checksummed(string memory raw) public pure returns (address a) {
+        string memory t = vm.trim(raw);
+        a = vm.parseAddress(t);
+        if (keccak256(bytes(t)) != keccak256(bytes(vm.toString(a)))) revert NotChecksummed(t);
+    }
+
+    /// The operator's inputs, from the environment: the treasury, the creators (comma-separated, any order,
+    /// checksummed) and the cap they confirm. Virtual so tests can supply inputs without `vm.setEnv`, which
+    /// is process-wide and races between parallel tests.
+    function readInputs() public view virtual returns (address treasury, address[] memory sorted, uint256 cap) {
+        return inputsFrom(
+            vm.envString("ROUNDS_TREASURY"), vm.envString("ROUNDS_CREATORS", ","), vm.envUint("ROUNDS_EXPECTED_CAP")
+        );
+    }
+
+    function inputsFrom(string memory treasuryRaw, string[] memory creatorsRaw, uint256 expectedCap)
+        public
+        pure
+        returns (address treasury, address[] memory sorted, uint256 cap)
+    {
+        treasury = checksummed(treasuryRaw);
+        if (treasury == address(0)) revert ZeroTreasury();
+        address[] memory creators = new address[](creatorsRaw.length);
+        for (uint256 i = 0; i < creatorsRaw.length; i++) {
+            creators[i] = checksummed(creatorsRaw[i]);
+        }
+        sorted = sortedCreators(creators);
+        cap = expectedCap;
+    }
 
     /// The chain and the two external contracts this deployment depends on, exactly as pinned.
     function checkChain() public view {
@@ -118,12 +161,9 @@ contract DeployRoundsV1 is Script {
     }
 
     function run() external returns (MakoRoundsV1 rounds) {
-        address treasury = vm.envAddress("ROUNDS_TREASURY");
-        address[] memory sorted = sortedCreators(vm.envAddress("ROUNDS_CREATORS", ","));
-        uint256 expectedCap = vm.envUint("ROUNDS_EXPECTED_CAP");
-        if (treasury == address(0)) revert ZeroTreasury();
-
+        (address treasury, address[] memory sorted, uint256 expectedCap) = readInputs();
         checkChain();
+
         vm.startBroadcast();
         rounds = new MakoRoundsV1(treasury, USDC, sorted);
         vm.stopBroadcast();
@@ -131,16 +171,25 @@ contract DeployRoundsV1 is Script {
         // `forge script` simulates all of run() before it broadcasts anything, so a failure here, a wrong
         // cap included, stops the deployment before a transaction is sent.
         checkDeployment(rounds, treasury, sorted, expectedCap);
+        console.log("MakoRoundsV1 (simulated or sent):", address(rounds));
+        console.log("No receipt yet. After the transaction lands, run verifyDeployment(address) against the chain.");
+    }
+
+    /// After the deployment transaction has landed: every check again, against the deployed contract on the
+    /// real chain, and only then the receipt. Read-only; it sends nothing.
+    function verifyDeployment(MakoRoundsV1 rounds) external {
+        (address treasury, address[] memory sorted, uint256 expectedCap) = readInputs();
+        checkChain();
+        checkDeployment(rounds, treasury, sorted, expectedCap);
         _receipt(rounds, treasury, sorted);
     }
 
     function _receipt(MakoRoundsV1 rounds, address treasury, address[] memory sorted) internal {
-        bool broadcast = vm.isContext(VmSafe.ForgeContext.ScriptBroadcast);
         string memory k = "receipt";
-        vm.serializeString(k, "kind", broadcast ? "deployment" : "DRY RUN, nothing deployed");
+        vm.serializeString(k, "kind", "verified deployment: every check re-run against the deployed contract");
         vm.serializeString(k, "settlementPaths", "settle (keeper, permissionless) only; no onReport, no forwarder");
         vm.serializeUint(k, "chainId", block.chainid);
-        vm.serializeUint(k, "blockNumber", block.number);
+        vm.serializeUint(k, "verifiedAtBlock", block.number);
         vm.serializeAddress(k, "roundsV1", address(rounds));
         vm.serializeBytes32(k, "runtimeCodeHash", address(rounds).codehash);
         vm.serializeBytes32(k, "creationCodeHash", keccak256(type(MakoRoundsV1).creationCode));
@@ -159,16 +208,14 @@ contract DeployRoundsV1 is Script {
         vm.serializeUint(k, "maxActiveRounds", rounds.MAX_ACTIVE_ROUNDS());
         string memory json = vm.serializeBytes(k, "constructorArgs", abi.encode(treasury, USDC, sorted));
 
+        string memory path = receiptPath(address(rounds));
+        vm.writeJson(json, path);
         console.log(json);
+        console.log("receipt written:", path);
         console.log("the deployment transaction itself is in broadcast/DeployRoundsV1.s.sol/<chainid>/run-latest.json");
-        if (broadcast) {
-            string memory path = string.concat(
-                "deployments/rounds-v1-", vm.toString(block.chainid), "-", vm.toString(address(rounds)), ".json"
-            );
-            vm.writeJson(json, path);
-            console.log("receipt written:", path);
-        } else {
-            console.log("DRY RUN: nothing was broadcast and no receipt was written.");
-        }
+    }
+
+    function receiptPath(address rounds) public view returns (string memory) {
+        return string.concat("deployments/rounds-v1-", vm.toString(block.chainid), "-", vm.toString(rounds), ".json");
     }
 }

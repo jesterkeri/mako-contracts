@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {DeployRoundsV1} from "../script/DeployRoundsV1.s.sol";
+import {DeployRoundsV1WithInputs} from "./DeployRoundsV1WithInputs.sol";
 import {MakoRoundsV1} from "../src/MakoRoundsV1.sol";
 import {IVerifierProxy} from "../src/interfaces/IVerifierProxy.sol";
 import {RoundSettlement} from "../src/RoundSettlement.sol";
@@ -64,6 +65,20 @@ contract DeployRoundsV1Test is Test {
         address[] memory s = script.sortedCreators(_list(C, B, A));
         MakoRoundsV1 r = new MakoRoundsV1(TREASURY, script.USDC(), s);
         assertTrue(r.isCreator(A) && r.isCreator(B) && r.isCreator(C));
+    }
+
+    /// The real input path. The only test in the suite that sets the environment, since `vm.setEnv` is
+    /// process-wide and parallel tests would race on it; every other test uses DeployRoundsV1WithInputs.
+    function test_InputsAreReadFromTheEnvironment() public {
+        vm.setEnv("ROUNDS_TREASURY", vm.toString(TREASURY));
+        vm.setEnv("ROUNDS_CREATORS", string.concat(vm.toString(C), " , ", vm.toString(A)));
+        vm.setEnv("ROUNDS_EXPECTED_CAP", "10");
+        (address treasury, address[] memory sorted, uint256 cap) = script.readInputs();
+        assertEq(treasury, TREASURY);
+        assertEq(sorted.length, 2);
+        assertEq(sorted[0], A);
+        assertEq(sorted[1], C);
+        assertEq(cap, 10);
     }
 
     // ---- the chain ----
@@ -198,14 +213,14 @@ contract DeployRoundsV1Test is Test {
         script.checkChain();
     }
 
-    /// The whole script, end to end, as a dry run against the live chain: checks, simulated deploy, read-back
-    /// and the receipt printed (not written, since this is not a broadcast).
+    /// The whole script, end to end, as a dry run against the live chain: checks, simulated deploy, read-back.
     function test_ForkFullDryRun() public {
         vm.skip(!_fork(), "MAKO_FORK_RPC is not set: fork test SKIPPED, which is NOT a pass");
-        vm.setEnv("ROUNDS_TREASURY", vm.toString(TREASURY));
-        vm.setEnv("ROUNDS_CREATORS", string.concat(vm.toString(C), ",", vm.toString(A), ",", vm.toString(B)));
-        vm.setEnv("ROUNDS_EXPECTED_CAP", "10");
-        MakoRoundsV1 r = script.run();
+        DeployRoundsV1WithInputs withInputs = new DeployRoundsV1WithInputs();
+        string[] memory c = new string[](3);
+        (c[0], c[1], c[2]) = (vm.toString(C), vm.toString(A), vm.toString(B));
+        withInputs.setInputs(vm.toString(TREASURY), c, 10);
+        MakoRoundsV1 r = withInputs.run();
         assertEq(r.TREASURY(), TREASURY);
         assertTrue(r.isCreator(A) && r.isCreator(B) && r.isCreator(C));
         assertEq(r.roundCount(), 0);

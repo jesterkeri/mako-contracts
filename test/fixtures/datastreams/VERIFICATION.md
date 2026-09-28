@@ -658,23 +658,38 @@ its own job on pull requests and on manual dispatch; every other gate still runs
 `onReport`, so it takes no forwarder (Joshua, 2026-09-28: keeper first, CRE as a later redeploy). It never
 reads a private key; the sender comes from `forge script --account`. Without `--broadcast` it is a dry run.
 
-Before anything is broadcast it refuses: any chain but 10143; a `USDC` whose code hash is not SPEC §4's
-(N22); a `VERIFIER_PROXY` whose code hash, `typeAndVersion`, fee manager or access controller differ from
-SPEC §4 (N16); an empty creator list, a zero creator or a repeated one (it sorts, since the constructor
-needs strictly ascending order). `forge script` simulates the whole of `run()` first, so the read-back after
-the simulated deploy also stops it before any transaction: treasury, USDC, `CREATORS_HASH`, every creator,
-`roundCount == 0`, and `MAX_ACTIVE_ROUNDS == ROUNDS_EXPECTED_CAP`, which makes the operator state the cap
-T0.1c chose. A broadcast writes the PREFLIGHT deployment receipt to `deployments/`.
+`run()` refuses, before anything is broadcast (`forge script` simulates the whole of `run()` first):
+- a treasury or creator address not in exact EIP-55 checksummed form, all-lowercase included, since both
+  are immutable and a typo would be permanent; a zero treasury; an empty, zero or repeated creator (it
+  sorts, since the constructor needs strictly ascending order);
+- any chain but 10143; a `USDC` whose code hash is not SPEC §4's (N22); a `VERIFIER_PROXY` whose code hash,
+  `typeAndVersion`, fee manager or access controller differ from SPEC §4 (N16);
+- any read-back mismatch after the simulated deploy: treasury, USDC, `CREATORS_HASH`, every creator,
+  `roundCount == 0`, and `MAX_ACTIVE_ROUNDS == ROUNDS_EXPECTED_CAP`, which makes the operator state the cap
+  T0.1c chose.
 
-Evidence, `test/DeployRoundsV1.t.sol`: 16 offline tests (every refusal by its exact error) and 6 fork
-tests. Run 2026-09-28 against the live chain at block 66397947 and later:
+**`run()` writes no receipt.** forge executes `run()` before sending anything, so a receipt written there
+would survive a failed broadcast and claim a deployment that never happened. The receipt comes from
+`verifyDeployment(address)`, run after the transaction lands: it repeats every check against the deployed
+contract on the chain and only then writes `deployments/rounds-v1-<chainid>-<address>.json`.
+
+Evidence: `test/DeployRoundsV1.t.sol` (17 offline, 6 fork) and `test/DeployRoundsV1Adversary.t.sol` (7
+offline, 5 fork), every refusal asserted by its exact error. Tests supply inputs through
+`test/DeployRoundsV1WithInputs.sol` rather than `vm.setEnv`, which is process-wide and raced between parallel
+tests; one test covers the real environment path. Run 2026-09-28 against the live chain:
 `MAKO_FORK_RPC=https://testnet-rpc.monad.xyz/ forge test --network monad --match-contract DeployRoundsV1`,
-**22 passed**, including the full dry run, so the pinned USDC and verifier values still match the chain.
+**35 passed**, including a full dry run, so the pinned USDC and verifier still match the chain.
+Six mutants (each check in `run()` and `verifyDeployment()` deleted, the checksum comparison deleted, the
+zero-treasury check deleted), run on temp copies against the fork: **6 killed**.
 
-`check-invariants.mjs` now counts a test named `test_Fork...` in any suite as not running in CI, and was
-shown to reject a map whose only N22 evidence is a fork test. N22 is no longer deferred. N16's
-"never names `MockKeystoneForwarder`" half is deferred to the CRE redeploy, since this deployment names no
-forwarder at all.
+**The adversary pass (2026-09-28) found:** a mistyped treasury or creator deploying permanently (now refused
+by checksum); `run()`'s checks untested through `run()`, so deleting them left every test green (now each is
+killed); a receipt written before the broadcast landed (now written only after, from the chain); and the
+coverage checker trusting a test's name to know it skips (now any test whose body calls `vm.skip` or forks
+is not CI evidence; a skip hidden in a helper is still not seen).
+
+N22 is no longer deferred. N16's "never names `MockKeystoneForwarder`" half is deferred to the CRE
+redeploy, since this deployment names no forwarder at all.
 
 ---
 

@@ -28,10 +28,12 @@ const EXPECTED = ['N1', 'N1b', 'N1c', 'N2', 'N3', 'N5', 'N6', 'N7', 'N8', 'N9', 
   'N16', 'N17', 'N18', 'N19', 'N22', 'N25', 'N26', 'N27'];
 
 // The suites that test MakoRoundsV1, RoundSettlement and the rounds deploy script. Fork tests skip offline, so
-// they count as evidence but not as CI evidence: every test in the fork suite, and every test named
-// `test_Fork...` in any other suite (DeployRoundsV1.t.sol mixes offline and fork tests).
+// they count as evidence but not as CI evidence: every test in the fork suite, every test named `test_Fork...`,
+// and every test whose own body calls `vm.skip` or creates a fork. The adversary pass on T1.5 showed the name
+// rule alone accepting a skipping test under another name. A skip hidden inside a helper is still not seen.
 const SUITES = ['test/MakoRoundsV1.t.sol', 'test/Adversary.t.sol', 'test/InvariantGaps.t.sol', 'test/InvariantGaps2.t.sol', 'test/RoundSettlement.t.sol',
-  'test/RuleCorpus.t.sol', 'test/RoundSettlementFork.t.sol', 'test/DeployRoundsV1.t.sol'];
+  'test/RuleCorpus.t.sol', 'test/RoundSettlementFork.t.sol', 'test/DeployRoundsV1.t.sol',
+  'test/DeployRoundsV1Adversary.t.sol'];
 const FORK_SUITE = 'test/RoundSettlementFork.t.sol';
 
 // Which KIND of evidence may stand for which invariant. A corpus row is evidence only for the report rule
@@ -49,6 +51,7 @@ const problems = [];
 // Comments and string literals removed, then only CONCRETE contracts: a test in an abstract contract never runs.
 const clean = (src) => src.replace(/"(?:[^"\\\n]|\\.)*"/g, '""').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
 const tests = new Map(); // name -> suite
+const skipping = new Set(); // tests that call vm.skip or fork, so they never count as CI evidence
 for (const f of SUITES) {
   const code = clean(readFileSync(join(REPO, f), 'utf8'));
   // Each declaration runs to the next one. One match per declaration, so "abstract contract X" is never
@@ -57,7 +60,13 @@ for (const f of SUITES) {
   decls.forEach((d, i) => {
     if (d[1] || d[2] !== 'contract') return;
     const body = code.slice(d.index, i + 1 < decls.length ? decls[i + 1].index : code.length);
-    for (const m of body.matchAll(/function\s+(test[A-Za-z0-9_]*)\s*\([^)]*\)\s*(?:public|external)\b/g)) tests.set(m[1], f);
+    const fns = [...body.matchAll(/function\s+(test[A-Za-z0-9_]*)\s*\([^)]*\)\s*(?:public|external)\b/g)];
+    fns.forEach((m, j) => {
+      tests.set(m[1], f);
+      // A test that can skip, or that forks, does not run as evidence in offline CI, whatever its name.
+      const fnBody = body.slice(m.index, j + 1 < fns.length ? fns[j + 1].index : body.length);
+      if (/\bvm\.skip\s*\(|\bcreate(?:Select)?Fork\s*\(/.test(fnBody)) skipping.add(m[1]);
+    });
   });
 }
 const rows = new Set(corpus.cases.map((c) => c.id));
@@ -101,7 +110,7 @@ for (const [id, e] of Object.entries(map.invariants)) {
     if (!(SCRIPT_FOR[id] || []).includes(p)) problems.push(`${id}: ${p} is not a check for this invariant`);
     if (!ranInCi(p)) problems.push(`${id}: ${p} is not run by CI`);
   }
-  const ciTests = t.filter((n) => tests.has(n) && tests.get(n) !== FORK_SUITE && !n.startsWith('test_Fork'));
+  const ciTests = t.filter((n) => tests.has(n) && tests.get(n) !== FORK_SUITE && !n.startsWith('test_Fork') && !skipping.has(n));
   const runsInCi = ciTests.length > 0 || (CORPUS_FOR.has(id) && r.some((x) => rows.has(x)))
     || s.some((p) => (SCRIPT_FOR[id] || []).includes(p) && ranInCi(p));
   if (!runsInCi && !e.deferred) problems.push(`${id}: no evidence that runs in CI (fork tests skip offline) and no deferral`);
