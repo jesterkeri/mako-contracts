@@ -557,7 +557,7 @@ and error specificity. That is exactly what the v8 and v11 rows do: with the pre
 still reject, as `WrongFeed`, so only asserting the exact selector detects the mutation. Recorded in
 `CASES.json` under `_impossibleCases`.
 
-### T1.4: every contract invariant maps to real evidence (2026-09-28)
+### T1.4: every contract invariant maps to real evidence (2026-09-27)
 
 `INVARIANTS.md` names a test for each contract-enforced invariant. An audit against the suite found that 20
 of those names did not exist as written. Most were covered under other names:
@@ -567,27 +567,48 @@ of those names did not exist as written. Most were covered under other names:
 - **N16, N22**: deploy-script assertions, which wait for T1.5.
 
 Two were genuine gaps and got new tests:
-- **N1b, `test_NoRoleCanForceRefundBeforeDeadline`.** For a two-sided round, `finalizeRefund` refuses the
-  creator, the treasury, both entrants, a stranger and the test contract, at `entryCloseTime`,
-  `startTime`, `closeTime` and `submitDeadline - 1`.
-- **N17 refund half, `test_ConservationRefund`.** For each refund reason (OneSided, Tie, NoPrice), with
-  topped-up stakes, every entrant gets back exactly their total stake, no fee is charged, the treasury
-  accrues nothing, and the contract ends holding nothing of the round.
+- **N1b, `test_NoRoleCanForceRefundBeforeDeadline`.** No caller can force a refund before the deadline.
+- **N17 refund half, `test_ConservationRefund`.** For each refund reason, every entrant gets back exactly
+  their stake, with no fee.
 
-Each new test fails for its defect:
-- Moving the NoPrice deadline to `closeTime` fails the N1b test, and existing tests catch it too.
-- Paying back 99% of a stake, or paying the pool out pro rata instead of the stake, fails
-  `test_ConservationRefund`.
+**The adversary pass on that work (`f8a6cb7`) then showed the map still overclaimed.** Five mutants each broke
+an invariant clause and survived the whole suite:
+- the creator fee paid to ANY invited creator (N19);
+- the round's creator settling with a doubled creator fee (N26);
+- `MAX_LEAD` deleted, since no test referred to `LeadTooLong` (N18);
+- `MIN_LEAD` short by 59 seconds, because the "plus or minus one" test stepped by a minute (N18);
+- `BOUNDARY_STEP = 30`, which the minute ±1 second test could not tell apart from 60 (N27).
 
-The two refund mutants were added to `script/mutate-solidity.mjs`. The full sweep then gave **67 killed, 0
-not killed**. The NoPrice mutant is killed by `test_NoRoleCanForceRefundBeforeDeadline` among others, and
-both refund mutants by `test_ConservationRefund` among others.
+It also showed `script/check-invariants.mjs` passing a falsified map: a test named only in a comment, a
+test from another contract's suite, and an invariant deleted from both lists at once. Adopted in response:
+- **`test/InvariantGaps.t.sol`**, the adversary's five tests:
+  - `test_AnotherCreatorCannotTakeThisRoundsFee`;
+  - `test_TheSettlerCannotChangeTheFees`, which compares fees, distributable and the treasury accrual
+    across four settlers;
+  - `test_MaxLeadAtTheBoundary`;
+  - `test_MinLeadAtOneSecond`;
+  - `test_HalfMinuteIsRejected`.
 
-`test/fixtures/invariant-coverage.json` maps each of the 23 contract-enforced invariants to its tests,
-corpus rows and scripts. `script/check-invariants.mjs`, in CI, fails if any named test, corpus row or script
-does not exist, or if an expected invariant has no entry. It was shown to fail on a renamed test and on a
-dropped invariant. N16 and N22's deploy-script halves are deferred to T1.5, which the map records by name.
-The map proves the evidence exists; the mutation sweep proves the evidence can fail.
+  All five mutants are in `script/mutate-solidity.mjs`, and each is killed by exactly its new test.
+- **The checker:**
+  - The expected invariant list lives in the script, not in the JSON it checks.
+  - Where the design repository is checked out alongside, the list is compared with `INVARIANTS.md`'s
+    table.
+  - A named test must be a real `public` or `external` test function, outside comments, in the rounds and
+    settlement suites.
+  - Every invariant needs evidence that runs in CI; fork tests skip there.
+
+  Shown to fail on each of the adversary's falsifications, on a test named only in a comment inside a
+  real suite, and on an invariant whose only evidence is a fork test.
+- **N10 at the source:** `script/check-surface.mjs` now also fails on any pause-like identifier in
+  `MakoRoundsV1.sol` or `RoundSettlement.sol`, comments removed. It was shown to fail on a planted
+  `whenNotPaused` modifier. A gate under an innocent name inside one of the six allowed writers is still
+  left to review, and the map says so.
+
+**Mutation result: 72 killed, 0 not killed**, including the two refund mutants and the five above.
+`test/fixtures/invariant-coverage.json` maps all 23 contract-enforced invariants. N16 and N22's
+deploy-script halves are deferred to T1.5, by name. The map proves the evidence exists; the sweep proves
+the evidence can fail.
 
 ---
 

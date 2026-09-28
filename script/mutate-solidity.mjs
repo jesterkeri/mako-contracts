@@ -372,6 +372,42 @@ const MUTATIONS = [
     from: '            _creatorFeeClaimed[roundId] = true;',
     to: '            // mutated: creator fee flag removed',
   },
+  // ---- found by the adversary pass on T1.4: each survived the whole suite until test/InvariantGaps.t.sol ----
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest|InvariantGapsTest',
+    name: 'rounds: pay the creator fee to ANY invited creator',
+    clause: 'N19 creator fee only to the round creator',
+    from: 'if (r.status == Status.Settled && msg.sender == r.creator && !_creatorFeeClaimed[roundId]) {',
+    to: 'if (r.status == Status.Settled && _isCreator[msg.sender] && !_creatorFeeClaimed[roundId]) {',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest|InvariantGapsTest',
+    name: 'rounds: the settler changes the creator fee',
+    clause: 'N26 the caller has no power over the result',
+    from: '        uint256 creatorFee = (smaller * CREATOR_FEE_BPS) / 10_000;',
+    to: '        uint256 creatorFee = msg.sender == r.creator ? (smaller * CREATOR_FEE_BPS * 2) / 10_000 : (smaller * CREATOR_FEE_BPS) / 10_000;',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest|InvariantGapsTest',
+    name: 'rounds: drop the MAX_LEAD bound',
+    clause: 'N18 MAX_LEAD',
+    from: '        if (startTime > openTime + MAX_LEAD) revert LeadTooLong();',
+    to: '        // mutated: MAX_LEAD removed',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest|InvariantGapsTest',
+    name: 'rounds: MIN_LEAD short by 59 seconds',
+    clause: 'N18 MIN_LEAD at +/- 1 second',
+    from: '        if (startTime < openTime + MIN_LEAD) revert LeadTooShort();',
+    to: '        if (startTime < openTime + MIN_LEAD - 59) revert LeadTooShort();',
+  },
+  {
+    file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest|InvariantGapsTest',
+    name: 'rounds: boundaries on half-minutes',
+    clause: 'N27 whole minutes',
+    from: '    uint64 public constant BOUNDARY_STEP = 60;',
+    to: '    uint64 public constant BOUNDARY_STEP = 30;',
+  },
   {
     file: 'src/MakoRoundsV1.sol', match: 'MakoRoundsV1Test|AdversaryTest',
     name: 'rounds: a refund pays back 99% of the stake',

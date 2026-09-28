@@ -50,6 +50,19 @@ if (forbidden.length) problems.push(`functions whose names imply forbidden autho
 if (hasFallback) problems.push('a fallback or receive function exists, so native value could arrive');
 for (const s of SPONSORED) if (!writers.includes(s)) problems.push(`sponsored selector ${s} does not exist`);
 
+// N10 at the SOURCE, since the ABI shows no modifiers: no pause-like identifier may appear in the contract or
+// its library, comments removed. Added at T1.4 after the adversary pointed out that a `whenNotPaused`
+// modifier on an allowed writer would pass the ABI checks above. What this still cannot see is a gate under
+// an innocent name inside one of the six allowed writers; that is left to review and to each writer's tests.
+if (!process.argv[2]) {
+  const PAUSE_WORDS = /\b\w*(pause|paused|halt|halted|freeze|frozen|stopped|circuitbreak|killswitch)\w*\b/i;
+  for (const f of ['src/MakoRoundsV1.sol', 'src/RoundSettlement.sol']) {
+    const code = readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+    const hit = code.match(PAUSE_WORDS);
+    if (hit) problems.push(`${f} declares or uses a pause-like identifier: ${hit[0]}`);
+  }
+}
+
 console.log(`MakoRoundsV1 surface: ${fns.length} functions, ${writers.length} state-changing`);
 console.log(`  writers:   ${writers.join(', ')}`);
 console.log(`  sponsored: ${SPONSORED.join(', ')}  (SPEC §9, exactly four)`);
@@ -59,4 +72,4 @@ if (problems.length) {
   for (const p of problems) console.error(`  - ${p}`);
   process.exit(1);
 }
-console.log('\n  N7: no setter exists for any value.  N10: no pause exists on any path.');
+console.log('\n  N7: no setter exists for any value.  N10: no pause function in the ABI and no pause-like identifier in the source.');
