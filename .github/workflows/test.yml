@@ -84,6 +84,9 @@ jobs:
       - name: External surface is exactly the allowlist (N7 no setters, N10 no pause)
         run: node script/check-surface.mjs
 
+      - name: The surface gate refuses overloads and other crafted ABIs
+        run: node script/check-surface.test.mjs
+
   # The Solidity mutation sweep compiles the contract once per mutant under via_ir, which cannot be turned
   # off (stack too deep), so it is the slow gate. It runs on pull requests (before anything reaches main) and
   # on demand, not on every push; every other gate above still runs on every push.

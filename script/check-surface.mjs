@@ -14,13 +14,35 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
-// The complete set of functions allowed to change state. Adding one is a reviewed change to this
-// list, which is the point. `onReport` joins it when the CRE forwarder layout is pinned (T2.0).
-const ALLOWED_WRITERS = ['claim', 'enter', 'finalizeRefund', 'schedule', 'settle', 'withdrawTreasury'];
+// The complete set of functions allowed to change state, by EXACT canonical signature. Names alone let an overload
+// in: a second `claim(bytes32)` that writes state or moves USDC kept every name on the list (Codex T1.4 r1). Adding
+// or changing one is a reviewed change to this list, which is the point. `onReport` joins it when the CRE
+// forwarder layout is pinned (T2.0).
+const ALLOWED_WRITERS = [
+  'claim(uint256)',
+  'enter(uint256,uint8,uint256)',
+  'finalizeRefund(uint256)',
+  'schedule(uint64)',
+  'settle(uint256,bytes,bytes)',
+  'withdrawTreasury()',
+];
 
-// SPEC §9: exactly four selectors are sponsored, "nothing else, ever". Recorded here so the
-// sponsorship configuration has one source of truth to be checked against.
-const SPONSORED = ['enter', 'claim', 'schedule', 'finalizeRefund'];
+// SPEC §9: exactly four selectors are sponsored, "nothing else, ever". The one source of truth the sponsorship
+// configuration is checked against: the app pins the same four selectors (mako-markets
+// src/lib/rounds-call-allowlist.ts, ROUND_*_SELECTOR), and the compiled contract must produce exactly these.
+const SPONSORED = {
+  'enter(uint256,uint8,uint256)': '9ad6c260',
+  'claim(uint256)': '379607f5',
+  'schedule(uint64)': '0ad9f5d2',
+  'finalizeRefund(uint256)': 'e6d6aedc',
+};
+
+/// A function's canonical signature, as its selector is computed: tuples spelled out as `(t1,t2)`.
+function canonicalType(p) {
+  if (!p.type.startsWith('tuple')) return p.type;
+  return `(${p.components.map(canonicalType).join(',')})${p.type.slice('tuple'.length)}`;
+}
+const signature = (f) => `${f.name}(${(f.inputs ?? []).map(canonicalType).join(',')})`;
 
 // Names that would signal an authority this contract must not have, whatever their mutability.
 // Two patterns, because a setter is detected by CASE: `setTreasury` is a setter and `settle` is not.
@@ -35,7 +57,11 @@ const abi = process.argv[2]
   : JSON.parse(execFileSync('forge', ['inspect', 'MakoRoundsV1', 'abi', '--json'], { encoding: 'utf8' }));
 
 const fns = abi.filter((x) => x.type === 'function');
-const writers = fns.filter((f) => f.stateMutability !== 'view' && f.stateMutability !== 'pure').map((f) => f.name).sort();
+const writers = fns.filter((f) => f.stateMutability !== 'view' && f.stateMutability !== 'pure').map(signature).sort();
+// Any name used by more than one function (view or not) is an overload, refused outright: a reviewer reading
+// `claim` must be reading the only `claim`.
+const names = fns.map((f) => f.name);
+const overloaded = [...new Set(names.filter((n, i) => names.indexOf(n) !== i))];
 const payable = fns.filter((f) => f.stateMutability === 'payable').map((f) => f.name);
 const forbidden = fns.map((f) => f.name).filter((n) => FORBIDDEN_WORDS.test(n) || SETTER.test(n));
 const hasFallback = abi.some((x) => x.type === 'fallback' || x.type === 'receive');
@@ -48,7 +74,15 @@ if (missing.length) problems.push(`allowlisted functions missing from the contra
 if (payable.length) problems.push(`payable functions, but this contract takes USDC only: ${payable.join(', ')}`);
 if (forbidden.length) problems.push(`functions whose names imply forbidden authority: ${forbidden.join(', ')}`);
 if (hasFallback) problems.push('a fallback or receive function exists, so native value could arrive');
-for (const s of SPONSORED) if (!writers.includes(s)) problems.push(`sponsored selector ${s} does not exist`);
+if (overloaded.length) problems.push(`overloaded function names (one function per name): ${overloaded.join(', ')}`);
+for (const s of Object.keys(SPONSORED)) if (!writers.includes(s)) problems.push(`sponsored function ${s} does not exist`);
+// The selectors themselves, from the compiler, for the compiled contract.
+if (!process.argv[2]) {
+  const ids = JSON.parse(execFileSync('forge', ['inspect', 'MakoRoundsV1', 'methodIdentifiers', '--json'], { encoding: 'utf8' }));
+  for (const [sig, sel] of Object.entries(SPONSORED)) {
+    if (ids[sig] !== sel) problems.push(`sponsored ${sig} has selector ${ids[sig]}, the sponsorship list pins ${sel}`);
+  }
+}
 
 // N7 beyond "no setter". The second adversary pass on T1.4 turned MAX_ACTIVE_ROUNDS into a storage variable
 // written inside `schedule`: no setter function existed, so the ABI checks passed. So, from the compiled
@@ -100,7 +134,7 @@ if (!process.argv[2]) {
 
 console.log(`MakoRoundsV1 surface: ${fns.length} functions, ${writers.length} state-changing`);
 console.log(`  writers:   ${writers.join(', ')}`);
-console.log(`  sponsored: ${SPONSORED.join(', ')}  (SPEC §9, exactly four)`);
+console.log(`  sponsored: ${Object.entries(SPONSORED).map(([k, v]) => `${k} 0x${v}`).join(', ')}  (SPEC §9, exactly four)`);
 
 if (problems.length) {
   console.error('\nSURFACE CHECK FAILED');
