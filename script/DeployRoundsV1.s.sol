@@ -202,13 +202,28 @@ contract DeployRoundsV1 is Script {
     /// The broadcast record is a local file, and `--rpc-url` can point at a local fork that keeps chain id
     /// 10143: a rehearsal there leaves a record and a contract that never existed on the real chain
     /// (adversary on 5d7e96e). So the record's claims are checked against the REAL chain, read through the
-    /// pinned `monad_testnet` endpoint in foundry.toml whatever `--rpc-url` says: the transaction exists, the
-    /// address had no code in the block before and has exactly the expected code from the recorded block.
+    /// pinned `monad_testnet` endpoint in foundry.toml whatever `--rpc-url` says. The real receipt itself must
+    /// say what the record says (Codex T1.5 r2): it succeeded, it was a contract creation (`to` null), it
+    /// created exactly `rounds`, in exactly the recorded block. A real but unrelated transaction fails here.
+    /// The historical code checks stay as additional evidence: no code before that block, the expected code at it.
     function checkOnChain(address rounds, bytes32 txHash, uint256 txBlock, bytes32 expectedCode) public {
-        if (!onChainReceiptExists(txHash)) revert NotOnChain("transaction");
-        if (txBlock == 0) revert NotOnChain("block");
+        ChainReceipt memory rc = onChainReceipt(txHash);
+        if (!rc.found) revert NotOnChain("transaction");
+        if (rc.status != 1) revert NotOnChain("transaction failed");
+        if (rc.to != address(0)) revert NotOnChain("not a contract creation");
+        if (rc.contractAddress != rounds) revert NotOnChain("created another address");
+        if (txBlock == 0 || rc.blockNumber != txBlock) revert NotOnChain("block");
         if (onChainCodeHash(rounds, txBlock - 1) != keccak256("")) revert NotOnChain("code before the deploy block");
         if (onChainCodeHash(rounds, txBlock) != expectedCode) revert NotOnChain("code at the deploy block");
+    }
+
+    /// What the real chain's receipt says. `to` and `contractAddress` are address(0) where the JSON has null.
+    struct ChainReceipt {
+        bool found;
+        uint256 status;
+        uint256 blockNumber;
+        address contractAddress;
+        address to;
     }
 
     /// The endpoint every on-chain fact in the receipt is read from. Virtual so tests can stand in a chain.
@@ -216,13 +231,51 @@ contract DeployRoundsV1 is Script {
         return "monad_testnet";
     }
 
-    /// True if the real chain has a receipt for `txHash`. forge encodes a JSON-RPC `null` as 32 zero bytes.
-    function onChainReceiptExists(bytes32 txHash) public virtual returns (bool) {
+    /// The real chain's receipt for `txHash`, decoded from forge's encoding of the JSON object: a tuple of its
+    /// fields in sorted key order, a null as 32 zero bytes, an address or 32-byte hash as itself, and every
+    /// quantity as dynamic bytes, big-endian (measured on Monad testnet receipts, 2026-10-06: the 14 fields
+    /// blockHash, blockNumber, contractAddress, cumulativeGasUsed, effectiveGasPrice, from, gasUsed, logs,
+    /// logsBloom, status, to, transactionHash, transactionIndex, type). The field at index 11 must be `txHash`
+    /// itself; if the endpoint ever returns another shape, that check fails and nothing is accepted.
+    function onChainReceipt(bytes32 txHash) public virtual returns (ChainReceipt memory rc) {
         bytes memory r =
             vm.rpc(chainEndpoint(), "eth_getTransactionReceipt", string.concat('["', vm.toString(txHash), '"]'));
-        if (r.length == 0) return false;
-        if (r.length == 32 && bytes32(r) == bytes32(0)) return false;
-        return true;
+        return decodeReceipt(r, txHash);
+    }
+
+    /// Pure decoding of `onChainReceipt`'s bytes, separate so it can be tested on captured responses.
+    function decodeReceipt(bytes memory r, bytes32 txHash) public pure returns (ChainReceipt memory rc) {
+        if (r.length == 0 || (r.length == 32 && bytes32(r) == bytes32(0))) return rc; // null: no such transaction
+        if (r.length < 32 * 15) revert NotOnChain("receipt layout");
+        uint256 base = _word(r, 0);
+        if (base + 32 * 14 > r.length) revert NotOnChain("receipt layout");
+        if (bytes32(_word(r, base + 32 * 11)) != txHash) revert NotOnChain("receipt layout");
+        rc.found = true;
+        rc.blockNumber = _quantityAt(r, base, _word(r, base + 32 * 1));
+        rc.contractAddress = _addressWord(_word(r, base + 32 * 2));
+        rc.status = _quantityAt(r, base, _word(r, base + 32 * 9));
+        rc.to = _addressWord(_word(r, base + 32 * 10));
+    }
+
+    function _word(bytes memory r, uint256 at) private pure returns (uint256 v) {
+        if (at + 32 > r.length) revert NotOnChain("receipt layout");
+        assembly ("memory-safe") {
+            v := mload(add(add(r, 32), at))
+        }
+    }
+
+    /// An address field, or zero for a JSON null; anything wider than 20 bytes is not an address.
+    function _addressWord(uint256 w) private pure returns (address) {
+        if (w >> 160 != 0) revert NotOnChain("receipt layout");
+        return address(uint160(w));
+    }
+
+    /// A quantity field: dynamic bytes at `offset` from the tuple start, read big-endian, at most 32 bytes.
+    function _quantityAt(bytes memory r, uint256 base, uint256 offset) private pure returns (uint256 v) {
+        uint256 len = _word(r, base + offset);
+        if (len == 0 || len > 32 || base + offset + 32 + len > r.length) revert NotOnChain("receipt layout");
+        uint256 raw = _word(r, base + offset + 32);
+        v = raw >> (8 * (32 - len));
     }
 
     /// keccak256 of the code at `a` on the real chain at block `blockNumber` (keccak256("") when there is none).

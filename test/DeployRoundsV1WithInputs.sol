@@ -12,7 +12,7 @@ contract DeployRoundsV1WithInputs is DeployRoundsV1 {
     string internal record;
     bool internal hasRecord;
     bool internal hasChainView;
-    bool internal viewReceipt;
+    ChainReceipt internal viewReceipt;
     bytes32 internal viewCodeBefore;
     bytes32 internal viewCodeAt;
 
@@ -35,16 +35,22 @@ contract DeployRoundsV1WithInputs is DeployRoundsV1 {
         return hasRecord ? record : super.broadcastRecord();
     }
 
-    /// A stand-in for the real chain's answers, for tests whose contract exists only on the local fork.
-    function setChainView(bool receiptExists, bytes32 codeHashBefore, bytes32 codeHashAt) external {
+    /// A stand-in for the real chain's answers, for tests whose contract exists only on the local fork: the
+    /// receipt it returns and the code hashes before and at `FAKE_DEPLOY_BLOCK`.
+    function setChainView(ChainReceipt memory receipt, bytes32 codeHashBefore, bytes32 codeHashAt) public {
         hasChainView = true;
-        viewReceipt = receiptExists;
+        viewReceipt = receipt;
         viewCodeBefore = codeHashBefore;
         viewCodeAt = codeHashAt;
     }
 
-    function onChainReceiptExists(bytes32 txHash) public override returns (bool) {
-        return hasChainView ? viewReceipt : super.onChainReceiptExists(txHash);
+    /// The honest case: a successful creation of `created` in `FAKE_DEPLOY_BLOCK`, with `codeHashAt` from then.
+    function setChainCreation(address created, bytes32 codeHashAt) external {
+        setChainView(ChainReceipt(true, 1, FAKE_DEPLOY_BLOCK, created, address(0)), keccak256(""), codeHashAt);
+    }
+
+    function onChainReceipt(bytes32 txHash) public override returns (ChainReceipt memory) {
+        return hasChainView ? viewReceipt : super.onChainReceipt(txHash);
     }
 
     function onChainCodeHash(address a, uint256 blockNumber) public override returns (bytes32) {

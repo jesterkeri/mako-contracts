@@ -116,49 +116,127 @@ contract DeployRoundsV1BindingTest is Test {
         assertFalse(written, "verified-deployment receipt written for a CREATE transaction that is not on chain 10143");
     }
 
-    // ---- the real-chain check (fix) ----
+    // ---- the real-chain check: the receipt itself must bind the transaction (Codex T1.5 r2) ----
 
     uint256 internal constant BLK = 70000123; // DeployRoundsV1WithInputs.FAKE_DEPLOY_BLOCK
+    bytes32 internal constant CODE = keccak256("code");
 
-    function test_OnChainCheckAcceptsWhatTheChainConfirms() public {
-        bytes32 code = keccak256("code");
-        script.setChainView(true, keccak256(""), code);
-        script.checkOnChain(A, HASH, BLK, code);
+    function _rc(bool found, uint256 status, uint256 blockNumber, address created, address to)
+        internal
+        pure
+        returns (DeployRoundsV1.ChainReceipt memory)
+    {
+        return DeployRoundsV1.ChainReceipt(found, status, blockNumber, created, to);
+    }
+
+    function _refused(DeployRoundsV1.ChainReceipt memory rc, bytes32 before, bytes32 at, string memory why) internal {
+        script.setChainView(rc, before, at);
+        vm.expectRevert(abi.encodeWithSelector(DeployRoundsV1.NotOnChain.selector, why));
+        script.checkOnChain(A, HASH, BLK, CODE);
+    }
+
+    function test_OnChainCheckAcceptsTheCreationTheChainConfirms() public {
+        script.setChainView(_rc(true, 1, BLK, A, address(0)), keccak256(""), CODE);
+        script.checkOnChain(A, HASH, BLK, CODE);
     }
 
     function test_OnChainCheckRefusesATransactionTheChainDoesNotHave() public {
-        script.setChainView(false, keccak256(""), keccak256("code"));
-        vm.expectRevert(abi.encodeWithSelector(DeployRoundsV1.NotOnChain.selector, "transaction"));
-        script.checkOnChain(A, HASH, BLK, keccak256("code"));
+        _refused(_rc(false, 0, 0, address(0), address(0)), keccak256(""), CODE, "transaction");
+    }
+
+    /// Codex's scenario: a real, unrelated transaction named in a forged record.
+    function test_OnChainCheckRefusesACallNamedAsTheCreation() public {
+        _refused(_rc(true, 1, BLK, address(0), address(0x1000)), keccak256(""), CODE, "not a contract creation");
+    }
+
+    function test_OnChainCheckRefusesAFailedCreation() public {
+        _refused(_rc(true, 0, BLK, A, address(0)), keccak256(""), CODE, "transaction failed");
+    }
+
+    function test_OnChainCheckRefusesACreationOfAnotherAddress() public {
+        _refused(_rc(true, 1, BLK, B, address(0)), keccak256(""), CODE, "created another address");
+    }
+
+    function test_OnChainCheckRefusesACreationInAnotherBlock() public {
+        _refused(_rc(true, 1, BLK + 1, A, address(0)), keccak256(""), CODE, "block");
     }
 
     function test_OnChainCheckRefusesCodeThatExistedBeforeTheDeployBlock() public {
-        script.setChainView(true, keccak256("code"), keccak256("code"));
-        vm.expectRevert(abi.encodeWithSelector(DeployRoundsV1.NotOnChain.selector, "code before the deploy block"));
-        script.checkOnChain(A, HASH, BLK, keccak256("code"));
+        _refused(_rc(true, 1, BLK, A, address(0)), CODE, CODE, "code before the deploy block");
     }
 
     function test_OnChainCheckRefusesOtherCodeAtTheDeployBlock() public {
-        script.setChainView(true, keccak256(""), keccak256("other code"));
-        vm.expectRevert(abi.encodeWithSelector(DeployRoundsV1.NotOnChain.selector, "code at the deploy block"));
-        script.checkOnChain(A, HASH, BLK, keccak256("code"));
+        _refused(_rc(true, 1, BLK, A, address(0)), keccak256(""), keccak256("other code"), "code at the deploy block");
     }
 
     function test_OnChainCheckRefusesBlockZero() public {
-        script.setChainView(true, keccak256(""), keccak256("code"));
+        script.setChainView(_rc(true, 1, 0, A, address(0)), keccak256(""), CODE);
         vm.expectRevert(abi.encodeWithSelector(DeployRoundsV1.NotOnChain.selector, "block"));
-        script.checkOnChain(A, HASH, 0, keccak256("code"));
+        script.checkOnChain(A, HASH, 0, CODE);
     }
 
-    /// The real reads, against Monad testnet itself: a transaction that exists (block 68548134, status 1, read
-    /// 2026-10-06), one that does not, the live V4's code by hash, and an address with no code.
+    // ---- decoding real receipts (captured; see test/fixtures/receipts/README.md) ----
+
+    bytes32 internal constant V4_CREATE = 0x820d7d68d9bf1bf54aa15cd33370e8baac6bd7e57b0670509a26f137ced39740;
+    bytes32 internal constant A_CALL = 0x5d8e177a4206fc7d9acaf0641f04f4c880260cbf11eb7a835a1e5c7c9a1460be;
+    address internal constant V4 = 0xbC5A58487D7949dA2B76aC84AfC032fD0aa26195;
+
+    function _fixture(string memory name) internal view returns (bytes memory) {
+        return vm.parseBytes(vm.trim(vm.readFile(string.concat("test/fixtures/receipts/", name))));
+    }
+
+    function test_DecodesARealCreationReceipt() public view {
+        DeployRoundsV1.ChainReceipt memory rc = script.decodeReceipt(_fixture("monad-v4-create-receipt.hex"), V4_CREATE);
+        assertTrue(rc.found);
+        assertEq(rc.status, 1);
+        assertEq(rc.blockNumber, 0x1f17e1e);
+        assertEq(rc.contractAddress, V4);
+        assertEq(rc.to, address(0));
+    }
+
+    function test_DecodesARealCallReceipt() public view {
+        DeployRoundsV1.ChainReceipt memory rc = script.decodeReceipt(_fixture("monad-call-receipt.hex"), A_CALL);
+        assertTrue(rc.found);
+        assertEq(rc.status, 1);
+        assertEq(rc.blockNumber, 0x415f626);
+        assertEq(rc.contractAddress, address(0));
+        assertEq(rc.to, address(0x1000));
+    }
+
+    /// A receipt for another transaction (or a reshaped response) is refused, never read as this one.
+    function test_DecodeRefusesAReceiptForAnotherHash() public {
+        bytes memory r = _fixture("monad-v4-create-receipt.hex");
+        vm.expectRevert(abi.encodeWithSelector(DeployRoundsV1.NotOnChain.selector, "receipt layout"));
+        script.decodeReceipt(r, A_CALL);
+    }
+
+    function test_DecodeReadsNullAsNotFound() public view {
+        assertFalse(script.decodeReceipt(new bytes(32), V4_CREATE).found);
+        assertFalse(script.decodeReceipt("", V4_CREATE).found);
+    }
+
+    function test_DecodeRefusesTruncatedBytes() public {
+        bytes memory r = _fixture("monad-call-receipt.hex");
+        bytes memory cut = new bytes(200);
+        for (uint256 i = 0; i < 200; i++) {
+            cut[i] = r[i];
+        }
+        vm.expectRevert(abi.encodeWithSelector(DeployRoundsV1.NotOnChain.selector, "receipt layout"));
+        script.decodeReceipt(cut, A_CALL);
+    }
+
+    /// The same, read live from Monad testnet through the pinned endpoint.
     function test_ForkRealChainReadsAreTruthful() public {
         vm.skip(!_fork(), "MAKO_FORK_RPC is not set: fork test SKIPPED, which is NOT a pass");
-        assertTrue(script.onChainReceiptExists(0x5d8e177a4206fc7d9acaf0641f04f4c880260cbf11eb7a835a1e5c7c9a1460be));
-        assertFalse(script.onChainReceiptExists(HASH));
+        DeployRoundsV1.ChainReceipt memory c = script.onChainReceipt(V4_CREATE);
+        assertTrue(
+            c.found && c.status == 1 && c.contractAddress == V4 && c.to == address(0) && c.blockNumber == 0x1f17e1e
+        );
+        DeployRoundsV1.ChainReceipt memory k = script.onChainReceipt(A_CALL);
+        assertTrue(k.found && k.contractAddress == address(0) && k.to == address(0x1000));
+        assertFalse(script.onChainReceipt(HASH).found);
         assertEq(
-            script.onChainCodeHash(0xbC5A58487D7949dA2B76aC84AfC032fD0aa26195, block.number),
-            0x0fc0b5588ccd94ced09091e88ac19fb106c4521b38b11c9f8a276073f2779523
+            script.onChainCodeHash(V4, block.number), 0x0fc0b5588ccd94ced09091e88ac19fb106c4521b38b11c9f8a276073f2779523
         );
         assertEq(script.onChainCodeHash(address(0xD1FF), block.number), keccak256(""));
     }
