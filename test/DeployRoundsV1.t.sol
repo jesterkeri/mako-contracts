@@ -14,7 +14,7 @@ import {RoundSettlement} from "../src/RoundSettlement.sol";
 /// only be accepted against the real chain, so those run in the fork half below, which SKIPS without
 /// `MAKO_FORK_RPC` exactly as `RoundSettlementFork.t.sol` does:
 ///
-///   MAKO_FORK_RPC=https://testnet-rpc.monad.xyz/ forge test --match-contract DeployRoundsV1 -vvv
+///   MAKO_FORK_RPC=https://testnet-rpc.monad.xyz/ forge test --network monad --match-contract DeployRoundsV1 -vvv
 contract DeployRoundsV1Test is Test {
     DeployRoundsV1 internal script;
 

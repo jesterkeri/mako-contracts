@@ -28,17 +28,20 @@ import {IVerifierProxy} from "../src/interfaces/IVerifierProxy.sol";
 ///         The script never reads a private key. The sender is whatever `forge script` is given:
 ///
 ///           ROUNDS_TREASURY=0x... ROUNDS_CREATORS=0xA...,0xB... ROUNDS_EXPECTED_CAP=10 \
-///             forge script script/DeployRoundsV1.s.sol --rpc-url monad_testnet --account <keystore>
-///             (add --broadcast only when Joshua has said to deploy; without it this is a dry run)
+///             forge script script/DeployRoundsV1.s.sol --network monad --rpc-url monad_testnet --account <keystore>
+///             (add --broadcast only when Joshua has said to deploy; without it this is a dry run.
+///              `--network monad` because forge 1.8 refuses to run a Monad chain in its Ethereum EVM.)
 ///
 ///         `run()` writes NO receipt, dry run or broadcast: forge executes `run()` before it sends anything,
 ///         so a receipt written there would claim a deployment even when the transaction then failed. Once
 ///         the deployment transaction has landed, the receipt comes from the chain itself:
 ///
-///           forge script script/DeployRoundsV1.s.sol --rpc-url monad_testnet \
+///           forge script script/DeployRoundsV1.s.sol --network monad --rpc-url monad_testnet \
 ///             --sig "verifyDeployment(address)" <deployed address>
 ///
-///         which re-runs every check against the deployed contract and writes
+///         from the same commit and with the same inputs, which re-runs every check against the deployed contract,
+///         requires its runtime code to be exactly this build's MakoRoundsV1 for those inputs and its address to
+///         be this script's landed CREATE in `broadcast/DeployRoundsV1.s.sol/10143/run-latest.json`, and writes
 ///         `deployments/rounds-v1-<chainid>-<address>.json`, the deployment receipt PREFLIGHT asks for.
 ///
 ///         Addresses are accepted only in exact EIP-55 checksummed form. TREASURY and CREATORS are
@@ -70,6 +73,8 @@ contract DeployRoundsV1 is Script {
     error ZeroTreasury();
     error ReadBackMismatch(string field);
     error NotChecksummed(string input);
+    error WrongRuntimeCode(bytes32 found, bytes32 expected);
+    error NoDeployTransaction(address rounds);
 
     /// An address exactly as EIP-55 writes it, surrounding spaces aside. All-lowercase is refused too: it
     /// carries no checksum, so it cannot catch a typo in an immutable address.
@@ -177,16 +182,103 @@ contract DeployRoundsV1 is Script {
 
     /// After the deployment transaction has landed: every check again, against the deployed contract on the
     /// real chain, and only then the receipt. Read-only; it sends nothing.
+    ///
+    /// Configuration alone does not identify the contract: a look-alike can answer every getter above and still
+    /// carry other settlement or withdrawal code (Codex T1.5 r1). So the receipt also requires (1) the runtime
+    /// code to be byte-for-byte what this build's MakoRoundsV1 compiles to for these exact constructor inputs,
+    /// and (2) the address to be the one this script's own CREATE transaction produced, with a successful
+    /// receipt, in forge's broadcast record.
     function verifyDeployment(MakoRoundsV1 rounds) external {
         (address treasury, address[] memory sorted, uint256 expectedCap) = readInputs();
         checkChain();
         checkDeployment(rounds, treasury, sorted, expectedCap);
-        _receipt(rounds, treasury, sorted);
+        bytes32 expectedCode = checkCodeIdentity(rounds, treasury, sorted);
+        (bytes32 txHash, uint256 txBlock) = deployTransactionIn(broadcastRecord(), address(rounds));
+        _receipt(rounds, treasury, sorted, expectedCode, txHash, txBlock);
     }
 
-    function _receipt(MakoRoundsV1 rounds, address treasury, address[] memory sorted) internal {
+    /// The runtime code MakoRoundsV1 has for these constructor inputs, from this build. Its immutables are part
+    /// of the runtime code, so a reference copy is deployed with the same inputs and its code hash read. Called
+    /// outside `vm.startBroadcast`, so under `forge script` the reference copy exists only in the simulation and
+    /// is never sent.
+    function expectedRuntimeCodeHash(address treasury, address[] memory sorted) public returns (bytes32) {
+        return address(new MakoRoundsV1(treasury, USDC, sorted)).codehash;
+    }
+
+    /// The deployed code must be exactly the expected code. Verify from the same commit that deployed.
+    function checkCodeIdentity(MakoRoundsV1 rounds, address treasury, address[] memory sorted)
+        public
+        returns (bytes32 expected)
+    {
+        expected = expectedRuntimeCodeHash(treasury, sorted);
+        if (address(rounds).codehash != expected) revert WrongRuntimeCode(address(rounds).codehash, expected);
+    }
+
+    /// Forge's record of this script's broadcast on this chain. Virtual so tests can supply a record.
+    function broadcastRecord() public view virtual returns (string memory) {
+        return
+            vm.readFile(
+                string.concat("broadcast/DeployRoundsV1.s.sol/", vm.toString(block.chainid), "/run-latest.json")
+            );
+    }
+
+    /// The CREATE of MakoRoundsV1 at `rounds` in the broadcast record, and its successful receipt: the
+    /// transaction hash and the block it landed in. Refuses an address this script did not create, and a
+    /// creation whose receipt is missing or failed.
+    function deployTransactionIn(string memory json, address rounds)
+        public
+        view
+        returns (bytes32 txHash, uint256 txBlock)
+    {
+        for (uint256 i = 0; vm.keyExistsJson(json, _at(".transactions", i)); i++) {
+            string memory t = _at(".transactions", i);
+            if (keccak256(bytes(vm.parseJsonString(json, string.concat(t, ".transactionType")))) != keccak256("CREATE"))
+            {
+                continue;
+            }
+            if (
+                keccak256(bytes(vm.parseJsonString(json, string.concat(t, ".contractName"))))
+                    != keccak256("MakoRoundsV1")
+            ) {
+                continue;
+            }
+            if (vm.parseJsonAddress(json, string.concat(t, ".contractAddress")) != rounds) continue;
+            txHash = vm.parseJsonBytes32(json, string.concat(t, ".hash"));
+            for (uint256 j = 0; vm.keyExistsJson(json, _at(".receipts", j)); j++) {
+                string memory r = _at(".receipts", j);
+                if (vm.parseJsonBytes32(json, string.concat(r, ".transactionHash")) != txHash) continue;
+                if (vm.parseJsonUint(json, string.concat(r, ".status")) != 1) revert NoDeployTransaction(rounds);
+                if (vm.parseJsonAddress(json, string.concat(r, ".contractAddress")) != rounds) {
+                    revert NoDeployTransaction(rounds);
+                }
+                return (txHash, vm.parseJsonUint(json, string.concat(r, ".blockNumber")));
+            }
+            revert NoDeployTransaction(rounds);
+        }
+        revert NoDeployTransaction(rounds);
+    }
+
+    function _at(string memory list, uint256 i) internal pure returns (string memory) {
+        return string.concat(list, "[", vm.toString(i), "]");
+    }
+
+    function _receipt(
+        MakoRoundsV1 rounds,
+        address treasury,
+        address[] memory sorted,
+        bytes32 expectedCode,
+        bytes32 txHash,
+        uint256 txBlock
+    ) internal {
         string memory k = "receipt";
-        vm.serializeString(k, "kind", "verified deployment: every check re-run against the deployed contract");
+        vm.serializeString(
+            k,
+            "kind",
+            "verified deployment: code identity, the CREATE transaction and every check, re-run against the deployed contract"
+        );
+        vm.serializeBytes32(k, "deployTransaction", txHash);
+        vm.serializeUint(k, "deployBlock", txBlock);
+        vm.serializeBytes32(k, "expectedRuntimeCodeHash", expectedCode);
         vm.serializeString(k, "settlementPaths", "settle (keeper, permissionless) only; no onReport, no forwarder");
         vm.serializeUint(k, "chainId", block.chainid);
         vm.serializeUint(k, "verifiedAtBlock", block.number);
@@ -212,7 +304,6 @@ contract DeployRoundsV1 is Script {
         vm.writeJson(json, path);
         console.log(json);
         console.log("receipt written:", path);
-        console.log("the deployment transaction itself is in broadcast/DeployRoundsV1.s.sol/<chainid>/run-latest.json");
     }
 
     function receiptPath(address rounds) public view returns (string memory) {

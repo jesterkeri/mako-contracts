@@ -9,6 +9,8 @@ contract DeployRoundsV1WithInputs is DeployRoundsV1 {
     string internal treasuryRaw;
     string[] internal creatorsRaw;
     uint256 internal expectedCap;
+    string internal record;
+    bool internal hasRecord;
 
     function setInputs(string memory treasury, string[] memory creators, uint256 cap) external {
         treasuryRaw = treasury;
@@ -17,6 +19,16 @@ contract DeployRoundsV1WithInputs is DeployRoundsV1 {
             creatorsRaw.push(creators[i]);
         }
         expectedCap = cap;
+    }
+
+    /// A broadcast record for verifyDeployment, instead of forge's file on disk.
+    function setBroadcastRecord(string memory json) external {
+        record = json;
+        hasRecord = true;
+    }
+
+    function broadcastRecord() public view override returns (string memory) {
+        return hasRecord ? record : super.broadcastRecord();
     }
 
     function readInputs() public view override returns (address, address[] memory, uint256) {

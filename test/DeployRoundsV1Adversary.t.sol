@@ -6,6 +6,7 @@ import {DeployRoundsV1} from "../script/DeployRoundsV1.s.sol";
 import {DeployRoundsV1WithInputs} from "./DeployRoundsV1WithInputs.sol";
 import {MakoRoundsV1} from "../src/MakoRoundsV1.sol";
 import {IVerifierProxy} from "../src/interfaces/IVerifierProxy.sol";
+import {BroadcastRecord} from "./BroadcastRecord.sol";
 
 /// @notice Adversary pass on T1.5 (2026-09-28), adopted: the deploy script's refusals exercised through
 /// `run()` and `verifyDeployment()` themselves, plus the checksum rule that pass showed was missing.
@@ -146,6 +147,7 @@ contract DeployRoundsV1AdversaryTest is Test {
         _env(vm.toString(TREASURY), "10");
         (address treasury, address[] memory sorted,) = script.readInputs();
         MakoRoundsV1 r = new MakoRoundsV1(treasury, script.USDC(), sorted);
+        script.setBroadcastRecord(BroadcastRecord.created(address(r), keccak256("deploy"), 1, 70000000));
         script.verifyDeployment(r);
         // removeFile succeeds only if the receipt exists, and cleans it up.
         vm.removeFile(script.receiptPath(address(r)));
