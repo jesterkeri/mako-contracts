@@ -147,7 +147,8 @@ contract DeployRoundsV1AdversaryTest is Test {
         _env(vm.toString(TREASURY), "10");
         (address treasury, address[] memory sorted,) = script.readInputs();
         MakoRoundsV1 r = new MakoRoundsV1(treasury, script.USDC(), sorted);
-        script.setBroadcastRecord(BroadcastRecord.created(address(r), keccak256("deploy"), 1, 70000000));
+        script.setBroadcastRecord(BroadcastRecord.created(address(r), keccak256("deploy"), 1, 70000123));
+        script.setChainView(true, keccak256(""), address(r).codehash);
         script.verifyDeployment(r);
         // removeFile succeeds only if the receipt exists, and cleans it up.
         vm.removeFile(script.receiptPath(address(r)));

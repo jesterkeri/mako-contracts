@@ -11,6 +11,10 @@ contract DeployRoundsV1WithInputs is DeployRoundsV1 {
     uint256 internal expectedCap;
     string internal record;
     bool internal hasRecord;
+    bool internal hasChainView;
+    bool internal viewReceipt;
+    bytes32 internal viewCodeBefore;
+    bytes32 internal viewCodeAt;
 
     function setInputs(string memory treasury, string[] memory creators, uint256 cap) external {
         treasuryRaw = treasury;
@@ -30,6 +34,26 @@ contract DeployRoundsV1WithInputs is DeployRoundsV1 {
     function broadcastRecord() public view override returns (string memory) {
         return hasRecord ? record : super.broadcastRecord();
     }
+
+    /// A stand-in for the real chain's answers, for tests whose contract exists only on the local fork.
+    function setChainView(bool receiptExists, bytes32 codeHashBefore, bytes32 codeHashAt) external {
+        hasChainView = true;
+        viewReceipt = receiptExists;
+        viewCodeBefore = codeHashBefore;
+        viewCodeAt = codeHashAt;
+    }
+
+    function onChainReceiptExists(bytes32 txHash) public override returns (bool) {
+        return hasChainView ? viewReceipt : super.onChainReceiptExists(txHash);
+    }
+
+    function onChainCodeHash(address a, uint256 blockNumber) public override returns (bytes32) {
+        if (!hasChainView) return super.onChainCodeHash(a, blockNumber);
+        return blockNumber == FAKE_DEPLOY_BLOCK - 1 ? viewCodeBefore : viewCodeAt;
+    }
+
+    /// The deploy block the stand-in chain answers about.
+    uint256 public constant FAKE_DEPLOY_BLOCK = 70000123;
 
     function readInputs() public view override returns (address, address[] memory, uint256) {
         return inputsFrom(treasuryRaw, creatorsRaw, expectedCap);

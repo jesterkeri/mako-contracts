@@ -75,6 +75,7 @@ contract DeployRoundsV1 is Script {
     error NotChecksummed(string input);
     error WrongRuntimeCode(bytes32 found, bytes32 expected);
     error NoDeployTransaction(address rounds);
+    error NotOnChain(string what);
 
     /// An address exactly as EIP-55 writes it, surrounding spaces aside. All-lowercase is refused too: it
     /// carries no checksum, so it cannot catch a typo in an immutable address.
@@ -194,7 +195,61 @@ contract DeployRoundsV1 is Script {
         checkDeployment(rounds, treasury, sorted, expectedCap);
         bytes32 expectedCode = checkCodeIdentity(rounds, treasury, sorted);
         (bytes32 txHash, uint256 txBlock) = deployTransactionIn(broadcastRecord(), address(rounds));
+        checkOnChain(address(rounds), txHash, txBlock, expectedCode);
         _receipt(rounds, treasury, sorted, expectedCode, txHash, txBlock);
+    }
+
+    /// The broadcast record is a local file, and `--rpc-url` can point at a local fork that keeps chain id
+    /// 10143: a rehearsal there leaves a record and a contract that never existed on the real chain
+    /// (adversary on 5d7e96e). So the record's claims are checked against the REAL chain, read through the
+    /// pinned `monad_testnet` endpoint in foundry.toml whatever `--rpc-url` says: the transaction exists, the
+    /// address had no code in the block before and has exactly the expected code from the recorded block.
+    function checkOnChain(address rounds, bytes32 txHash, uint256 txBlock, bytes32 expectedCode) public {
+        if (!onChainReceiptExists(txHash)) revert NotOnChain("transaction");
+        if (txBlock == 0) revert NotOnChain("block");
+        if (onChainCodeHash(rounds, txBlock - 1) != keccak256("")) revert NotOnChain("code before the deploy block");
+        if (onChainCodeHash(rounds, txBlock) != expectedCode) revert NotOnChain("code at the deploy block");
+    }
+
+    /// The endpoint every on-chain fact in the receipt is read from. Virtual so tests can stand in a chain.
+    function chainEndpoint() public view virtual returns (string memory) {
+        return "monad_testnet";
+    }
+
+    /// True if the real chain has a receipt for `txHash`. forge encodes a JSON-RPC `null` as 32 zero bytes.
+    function onChainReceiptExists(bytes32 txHash) public virtual returns (bool) {
+        bytes memory r =
+            vm.rpc(chainEndpoint(), "eth_getTransactionReceipt", string.concat('["', vm.toString(txHash), '"]'));
+        if (r.length == 0) return false;
+        if (r.length == 32 && bytes32(r) == bytes32(0)) return false;
+        return true;
+    }
+
+    /// keccak256 of the code at `a` on the real chain at block `blockNumber` (keccak256("") when there is none).
+    function onChainCodeHash(address a, uint256 blockNumber) public virtual returns (bytes32) {
+        bytes memory code = vm.rpc(
+            chainEndpoint(), "eth_getCode", string.concat('["', vm.toString(a), '","', quantity(blockNumber), '"]')
+        );
+        return keccak256(code);
+    }
+
+    /// A JSON-RPC quantity: `0x` and the hex digits without leading zeros (`0x0` for zero). A zero-padded
+    /// block number is refused by Monad's RPC as a block that does not exist.
+    function quantity(uint256 v) public pure returns (string memory) {
+        if (v == 0) return "0x0";
+        bytes memory digits = "0123456789abcdef";
+        uint256 len;
+        for (uint256 t = v; t != 0; t >>= 4) {
+            len++;
+        }
+        bytes memory out = new bytes(len + 2);
+        out[0] = "0";
+        out[1] = "x";
+        for (uint256 i = len + 1; i >= 2; i--) {
+            out[i] = digits[v & 0xf];
+            v >>= 4;
+        }
+        return string(out);
     }
 
     /// The runtime code MakoRoundsV1 has for these constructor inputs, from this build. Its immutables are part

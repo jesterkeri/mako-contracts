@@ -183,6 +183,8 @@ contract DeployRoundsV1IdentityTest is Test {
         vm.skip(!_fork(), "MAKO_FORK_RPC is not set: fork test SKIPPED, which is NOT a pass");
         (MakoRoundsV1 r,,) = _genuine("test_ForkVerifyDeploymentRecordsCodeAndTransaction");
         script.setBroadcastRecord(BroadcastRecord.created(address(r), HASH, 1, 70000123));
+        // The contract exists only on the local fork, so the real chain's answers are stood in.
+        script.setChainView(true, keccak256(""), address(r).codehash);
         script.verifyDeployment(r);
         string memory path = script.receiptPath(address(r));
         string memory json = vm.readFile(path);
