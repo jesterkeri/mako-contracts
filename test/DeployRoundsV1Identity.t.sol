@@ -37,6 +37,12 @@ contract DeployRoundsV1IdentityTest is Test {
         return true;
     }
 
+    /// A receipt left by an earlier aborted run (or a mutation run) must not decide a test either way.
+    function _clear(address at) internal {
+        string memory path = script.receiptPath(at);
+        if (vm.exists(path)) vm.removeFile(path);
+    }
+
     function _genuine(string memory tag) internal returns (MakoRoundsV1 r, address treasury, address[] memory sorted) {
         (treasury, sorted,) = script.readInputs();
         // Each test its own CREATE2 address: tests run in parallel, and two deployments from the same default
@@ -151,6 +157,7 @@ contract DeployRoundsV1IdentityTest is Test {
         vm.skip(!_fork(), "MAKO_FORK_RPC is not set: fork test SKIPPED, which is NOT a pass");
         (MakoRoundsV1 r,,) = _genuine("test_ForkVerifyDeploymentRefusesALookAlike");
         MakoRoundsV1 fake = _lookAlike(r);
+        _clear(LOOK_ALIKE);
         script.setBroadcastRecord(BroadcastRecord.created(LOOK_ALIKE, HASH, 1, 7));
         vm.expectRevert(
             abi.encodeWithSelector(DeployRoundsV1.WrongRuntimeCode.selector, LOOK_ALIKE.codehash, address(r).codehash)
@@ -164,6 +171,7 @@ contract DeployRoundsV1IdentityTest is Test {
     function test_ForkVerifyDeploymentRefusesAnUnrecordedAddress() public {
         vm.skip(!_fork(), "MAKO_FORK_RPC is not set: fork test SKIPPED, which is NOT a pass");
         (MakoRoundsV1 r,,) = _genuine("test_ForkVerifyDeploymentRefusesAnUnrecordedAddress");
+        _clear(address(r));
         script.setBroadcastRecord(BroadcastRecord.created(address(0xD1FF), HASH, 1, 7));
         vm.expectRevert(abi.encodeWithSelector(DeployRoundsV1.NoDeployTransaction.selector, address(r)));
         script.verifyDeployment(r);
