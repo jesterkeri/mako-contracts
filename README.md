@@ -1,76 +1,27 @@
-# Mako Markets — Contracts
+# Mako Market: Contracts
 
-Short-form parimutuel prediction markets on Monad.
+Solidity contracts for [Mako Market](https://makomarket.xyz), a prediction market on Monad. App and services: [jesterkeri/mako-markets](https://github.com/jesterkeri/mako-markets).
 
-Built for **Monad Blitz Lagos** — April 11, 2026.
+## Live on Monad testnet (chain 10143)
 
-## What it is
+| Contract | Source | Address |
+|---|---|---|
+| Pools (YES/NO parimutuel, USDC) | [`src/MakoMarketsV4.sol`](src/MakoMarketsV4.sol) | [`0xbC5A58487D7949dA2B76aC84AfC032fD0aa26195`](https://testnet.monadvision.com/address/0xbC5A58487D7949dA2B76aC84AfC032fD0aa26195) |
+| Rounds (15-minute Up or Down, USDC) | [`src/MakoRoundsV1.sol`](src/MakoRoundsV1.sol) | [`0x9dC0e0b9E8F1905740D8B98E90fe07288dcC2921`](https://testnet.monadvision.com/address/0x9dC0e0b9E8F1905740D8B98E90fe07288dcC2921) |
 
-A single Solidity contract (`MakoMarkets.sol`) that lets anyone:
+## What each contract does
 
-- **Create** a YES/NO prediction market (football fixture, crypto price, or NBA game)
-- **Bet** native MON on either side until `closeTime`
-- **Resolve** the market via an off-chain resolver
-- **Claim** winnings — pool is split parimutuel-style, minus 1% protocol fee and 2% creator fee
+- **`MakoMarketsV4`**: anyone opens a YES/NO pool; bets go into one pot and winners split it. The creator earns 2% only when both sides hold real money; a one-sided pool refunds everyone.
+- **`MakoRoundsV1`**: rounds scheduled by Mako Market. Entries close when the round starts. Open and close prices are Chainlink Data Streams reports, verified on chain through the Data Streams verifier proxy; a one-sided round, or one with no valid report, refunds everyone.
+- **`RoundSettlement`** ([`src/RoundSettlement.sol`](src/RoundSettlement.sol)): the library that checks a Data Streams v3 report against the round's boundary second (feed, schema, timestamps, bid/ask spread, expiry) before it can settle anything.
+- **`MakoPrivateMarketsV1`**: invite-only markets; not enabled in the app.
+- **`MakoMarkets`**: the original April 2026 contract from Monad Blitz Lagos (native MON), kept for history and superseded by V4.
 
-Zero external dependencies. No OpenZeppelin, no oracles wired in. Pure EVM.
-
-## Payout math
-
-Parimutuel, like horse racing. Your payout is proportional to the ratio of your side to the total pool:
-
-```
-totalPool   = totalYes + totalNo
-payoutPool  = totalPool * 0.97            # 3% total fees
-your_payout = your_bet * payoutPool / winning_side_pool
-```
-
-One-sided pools (nobody took the other side) auto-refund all bettors — no fees taken.
-
-## Market types
-
-| Type       | `oracleRef` encoding                      | Resolved by                  |
-|------------|-------------------------------------------|------------------------------|
-| FOOTBALL   | `matchId:qType:param` (bytes32 utf-8)     | off-chain resolver           |
-| CRYPTO     | `symbol:direction:strike`                 | off-chain resolver           |
-| BASKETBALL | `gameId:qType:param`                      | off-chain resolver           |
-
-## Usage
+## Build and test
 
 ```bash
-forge install
 forge build
-forge test -vv
+forge test
 ```
 
-### Deploy to Monad testnet
-
-```bash
-cp .env.example .env   # fill in PRIVATE_KEY and TREASURY
-source .env
-forge script script/Deploy.s.sol:Deploy \
-  --rpc-url https://testnet-rpc.monad.xyz/ \
-  --private-key $PRIVATE_KEY \
-  --broadcast -vvv
-```
-
-## Test coverage
-
-17 tests covering the full lifecycle, the math, access control, and the most exploitable edge cases:
-
-- Happy path: create → bet → resolve → claim
-- Parimutuel math matches spec to 12-decimal precision on a 60/40 split
-- Zero-pool auto-refund (the classic parimutuel footgun)
-- Double-claim reverts (both `claim` and `claimCreatorFee`)
-- Bet after `closeTime` reverts
-- Non-resolver cannot resolve
-- Treasury accrues exactly 1%
-- Creator fee is exactly 2%
-- Dynamic dust-attack threshold: below-floor pools auto-refund; above-floor settle
-- Force-refund safety valve after the 24h grace window
-- `minLiquidityRatioBps` math spot-check at the current creator fee
-- Football, crypto, and basketball markets run the same codepath
-
-## License
-
-MIT
+Fork tests against the real Data Streams verifier run when a Monad testnet RPC is configured (`foundry.toml` alias `monad_testnet`); without one they skip.
