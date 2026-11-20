@@ -7,7 +7,8 @@ import {MakoFunder} from "../src/MakoFunder.sol";
 /// Owner of the funder; drives every call with fuzzed arguments and records ghost state.
 contract FunderHandler is Test {
     MakoFunder public f;
-    address[6] public pool = [address(0x2001), address(0x2002), address(0x2003), address(0x2004), address(0x2005), address(0x2006)];
+    address[6] public pool =
+        [address(0x2001), address(0x2002), address(0x2003), address(0x2004), address(0x2005), address(0x2006)];
     address public constant OUT = address(0x7777);
 
     mapping(uint256 => uint256) public topUpsOnDay;
