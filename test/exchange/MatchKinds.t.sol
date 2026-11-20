@@ -317,6 +317,35 @@ contract MatchKindsTest is Scene {
         _expectErr(abi.encodeWithSelector(X.PositionCap.selector, _hash(c.t)), _data(c));
     }
 
+    function test_positionCap_boundary_exactlyTheCapIsAllowed_oneLotMoreIsNot() public {
+        uint256 mc = _marketCap(2, FEE, 100e6);
+        // a buying taker (direct): exactly the cap passes, one more lot does not
+        (uint256 bk, address b1) = _party("capBuyer", mc, 1_000e6, 0);
+        (uint256 sk, address s1) = _party("capSeller", mc, 0, 100e6);
+        _settle1(bk, _order(b1, mc, 0, true, 70, 100e6), sk, _order(s1, mc, 0, false, 40, 100e6), 100e6);
+        assertEq(ex.positionOf(mc, 0, b1), 100e6);
+        (, address s2) = _party("capSeller2", mc, 0, 100e6);
+        Call memory c =
+            _mk(_order(b1, mc, 0, true, 71, LOT), _one(_order(s2, mc, 0, false, 40, LOT)), LOT, _oneFill(LOT));
+        _expectErr(abi.encodeWithSelector(X.PositionCap.selector, _hash(c.t)), _data(c));
+        // a buying maker (the taker sells): the same line for the maker leg
+        (uint256 mk1, address m1) = _party("capMaker", mc, 1_000e6, 0);
+        (uint256 tk1, address t1) = _party("capTaker", mc, 0, 100e6);
+        _settle1(tk1, _order(t1, mc, 0, false, 10, 100e6), mk1, _order(m1, mc, 0, true, 50, 100e6), 100e6);
+        assertEq(ex.positionOf(mc, 0, m1), 100e6);
+        (, address t2) = _party("capTaker2", mc, 0, 100e6);
+        c = _mk(_order(t2, mc, 0, false, 10, LOT), _one(_order(m1, mc, 0, true, 51, LOT)), LOT, _oneFill(LOT));
+        _expectErr(abi.encodeWithSelector(X.PositionCap.selector, _hash(c.ms[0])), _data(c));
+        // mintSets: exactly the cap passes, one more lot does not
+        (, address minter) = _party("capMinter", mc, 0, 0);
+        _deposit(minter, 200e6);
+        vm.startPrank(minter);
+        ex.mintSets(mc, 100e6);
+        vm.expectRevert(abi.encodeWithSelector(X.PositionCap.selector, bytes32(0)));
+        ex.mintSets(mc, LOT);
+        vm.stopPrank();
+    }
+
     function test_positionCap_makerLegSeesEarlierLegs() public {
         // w already holds 100 of option 0 (cap 150) and has two bids of 40 each: the first leaf passes (140), the
         // second sees the first's write (180) and reverts; checked against the position before the call it would pass
