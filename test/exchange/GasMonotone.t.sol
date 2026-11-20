@@ -18,6 +18,27 @@ import {MakoOutcomeExchangeV1 as X} from "../../src/MakoOutcomeExchangeV1.sol";
 /// Asserts gas_after <= estimate + TOL_PER_PARTY per party (taker plus makers). The registered signer of the spike's
 /// action list (`setOrderSigner`) is not part of this build.
 contract GasMonotoneTest is ExchangeBase {
+    /// @notice Canary for the CI step that runs this file with `FOUNDRY_PROFILE=monad` (adversary pass 1): a skipped
+    /// cash write shows against the 3,000-gas per-party bound only under Monad's gas schedule, so that step must prove
+    /// the schedule is really applied. A cold account access costs 2,600 gas on Ethereum and 10,100 on Monad. With
+    /// `EXPECT_MONAD_GAS=true` (set by that CI step) the run must be on Monad's schedule; without it, on Ethereum's.
+    function test_gasSchedule_isTheOneThisRunExpects() public view {
+        address fresh = address(uint160(uint256(keccak256("mako exchange gas schedule canary"))));
+        uint256 g = gasleft();
+        uint256 bal = fresh.balance;
+        uint256 used = g - gasleft();
+        assertEq(bal, 0, "canary account must be empty");
+        if (vm.envOr("EXPECT_MONAD_GAS", false)) {
+            assertGt(
+                used,
+                8_000,
+                "EXPECT_MONAD_GAS is set but a cold account access cost Ethereum's price: the Monad schedule is NOT applied"
+            );
+        } else {
+            assertLt(used, 5_000, "a cold account access cost Monad's price in a run that expects Ethereum's schedule");
+        }
+    }
+
     uint256 internal constant GAS_CAP = 20_000_000;
     /// One write that changes a slot costs 2,800 more than one that rewrites the same value (EIP-2200 warm: 2,900 vs 100).
     /// That wobble is allowed once per party in the call and nothing more; anything above is a defect.

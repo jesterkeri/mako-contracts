@@ -233,11 +233,21 @@ if (compiled) {
   const cm = body(src, 'createMarket') ?? '';
   const ce = body(src, 'closeEarly') ?? '';
   const rest = src.replace(cm, '').replace(ce, '');
+  // A write is caught whatever the struct is called (`mk`, `_markets[id]`, or any storage alias of a market, adversary
+  // pass 1), in any assignment form, `++`/`--`, or `delete`. The one allowed match is the in-memory Plan copying the fee
+  // rate once in matchOrders (`p.feeRate = mk.feeRate;`), so `p` may never name a market.
+  const allowed = { feeRate: ['p.feeRate = mk.feeRate;'] };
   for (const t of [...TERMS, 'tradingClose']) {
-    // a market struct reached as `mk` or as `_markets[id]` (a Plan in memory has its own copies of fee rate and cap)
-    const w = new RegExp(`(\\bmk|_markets\\s*\\[[^\\]]*\\])\\.${t}\\s*(=(?!=)|\\+=|-=)`);
-    if (w.test(rest)) problems.push(`market term ${t} is written outside createMarket${t === 'tradingClose' ? ' and closeEarly' : ''}`);
+    let r2 = rest;
+    for (const a of allowed[t] ?? []) r2 = r2.split(a).join('');
+    const assign = new RegExp(`\\.\\s*${t}\\s*(?:[-+*/%|&^]|<<|>>)?=(?!=)`);
+    const step = new RegExp(`(\\+\\+|--)\\s*[\\w.\\[\\]\\s]*\\.\\s*${t}\\b|\\.\\s*${t}\\s*(\\+\\+|--)`);
+    const del = new RegExp(`\\bdelete\\s+[^;]*\\.\\s*${t}\\b`);
+    if (assign.test(r2) || step.test(r2) || del.test(r2)) problems.push(`market term ${t} is written outside createMarket${t === 'tradingClose' ? ' and closeEarly' : ''}`);
   }
+  if (/MarketS\s+storage\s+p\b/.test(src)) problems.push('a market storage pointer named `p` (reserved for the in-memory Plan)');
+  if (/_markets\s*\[[^\]]*\]\s*=(?!=)|\bdelete\s+_markets\b/.test(src)) problems.push('a whole market struct is assigned or deleted');
+  if (/\bsstore\s*\(/.test(src)) problems.push('assembly sstore in the source');
   if (!/block\.timestamp\s*<\s*mk\.tradingClose/.test(ce)) problems.push('closeEarly must only move tradingClose earlier (no `block.timestamp < mk.tradingClose` guard found)');
 
   // the protocol constants of plan 1, 4.2 and 4.4

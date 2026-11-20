@@ -74,6 +74,7 @@ jobs:
       - name: Exchange gas-monotone property under Monad's gas schedule
         env:
           FOUNDRY_PROFILE: monad
+          EXPECT_MONAD_GAS: "true"
         run: forge test --match-path test/exchange/GasMonotone.t.sol
 
       # PROOF_STANDARD.md Version 3 gates. All offline: no network, no credentials, no chain.
