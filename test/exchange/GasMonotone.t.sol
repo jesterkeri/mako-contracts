@@ -53,6 +53,8 @@ contract GasMonotoneTest is ExchangeBase {
     }
 
     int256 internal maxDelta;
+    uint256 internal fullMergeSettled;
+    uint256 internal fullMergeOwnSellFailures;
     Party[] internal ps; // taker, makers..., two third parties
     uint256 internal M;
     bytes internal data;
@@ -147,10 +149,8 @@ contract GasMonotoneTest is ExchangeBase {
     // ------------------------------------------------------------------------------------------------ actions
     function _apply(uint256 seed, uint256 i) internal returns (bool) {
         uint256 r = _r(seed, 100 + i);
-        // 3 in 4 actions come from a party of the call (the interesting ones), the rest from anyone
-        address a = ps[((r >> 120) & 3 != 0 ? r % (ps.length - 2) : r % ps.length)].a;
-        uint256 kind = (r >> 8) % 11;
-        if (kind >= 9) kind -= 7; // mintSets and mergeSets twice as likely
+        (uint256 kind, uint256 who) = _pick(r, ps.length);
+        address a = ps[who].a;
         uint256 amt = _amt(r >> 16);
         if (kind == 0 || kind == 8) {
             usd.mint(a, amt);
@@ -163,17 +163,7 @@ contract GasMonotoneTest is ExchangeBase {
             if ((r >> 100) & 1 == 1 || amt > c) amt = c;
             return _try(a, abi.encodeCall(ex.withdraw, (amt)));
         }
-        if (kind == 9) {
-            // merge every complete set the account holds (empties a third party's slot contribution, zeroes a net)
-            uint256 nOpt = ex.marketOf(M).nOptions;
-            amt = type(uint256).max;
-            for (uint256 o; o < nOpt; ++o) {
-                uint256 h = ex.positionOf(M, uint8(o), a);
-                if (h < amt) amt = h;
-            }
-            amt = amt / LOT * LOT;
-            return amt != 0 && _try(a, abi.encodeCall(ex.mergeSets, (M, amt)));
-        }
+        if (kind == 9) return _fullMerge(a) != 0;
         if (kind == 2) return _try(a, abi.encodeCall(ex.mintSets, (M, amt)));
         if (kind == 3) return _try(a, abi.encodeCall(ex.mergeSets, (M, amt)));
         if (kind == 4) return _try(a, abi.encodeCall(ex.redeem, (M)));
@@ -185,6 +175,124 @@ contract GasMonotoneTest is ExchangeBase {
         }
         if (kind == 6) return _try(a, abi.encodeCall(ex.incrementNonce, ()));
         return _try(a, abi.encodeCall(ex.incrementNonce, ()));
+    }
+
+    /// @dev Which action, by whom. Kinds 0-9 once each, plus 10 and 11 as a second mintSets and mergeSets (twice as
+    /// likely). Codex R1 F1: the earlier `% 11` with `kind -= 7` from 9 never produced kind 9 (merge every set).
+    /// 3 in 4 actions come from a party of the call (the interesting ones), the rest from anyone, third parties included.
+    function _pick(uint256 r, uint256 nPs) internal pure returns (uint256 kind, uint256 who) {
+        who = (r >> 120) & 3 != 0 ? r % (nPs - 2) : r % nPs;
+        kind = (r >> 8) % 12;
+        if (kind >= 10) kind -= 8;
+    }
+
+    /// @dev Merge every complete set `a` holds in M (empties a third party's share of the market totals, zeroes a net).
+    /// Returns the sets merged, 0 if none or the merge reverted.
+    function _fullMerge(address a) internal returns (uint256 amt) {
+        uint256 nOpt = ex.marketOf(M).nOptions;
+        amt = type(uint256).max;
+        for (uint256 o; o < nOpt; ++o) {
+            uint256 h = ex.positionOf(M, uint8(o), a);
+            if (h < amt) amt = h;
+        }
+        amt = amt / LOT * LOT;
+        if (amt == 0 || !_try(a, abi.encodeCall(ex.mergeSets, (M, amt)))) return 0;
+    }
+
+    /// Codex R1 F1: the generator reaches the full merge, from a party of the call and from a third party.
+    function test_gasMonotone_generator_reachesFullMerge_byPartyAndByThirdParty() public pure {
+        uint256 nPs = 1 + 3 + 2; // a 3-maker direct: taker, three makers, two third parties
+        bool byParty;
+        bool byThird;
+        for (uint256 seed; seed < 1024 && !(byParty && byThird); ++seed) {
+            for (uint256 i; i < 4; ++i) {
+                (uint256 kind, uint256 who) = _pick(_r(seed, 100 + i), nPs);
+                if (kind != 9) continue;
+                if (who < nPs - 2) byParty = true;
+                else byThird = true;
+            }
+        }
+        assertTrue(byParty, "the generator never picks a full merge by a party of the call");
+        assertTrue(byThird, "the generator never picks a full merge by a third party");
+    }
+
+    /// Codex R1 F1, deterministic: the wallet holds complete sets at the estimate and merges every one of them before
+    /// inclusion, for the taker, the first maker and a third party, in every match kind. The merge must really happen
+    /// (all sets gone) and the call must stay within estimate + 3,000 per party.
+    function test_gasMonotone_fullMergeBetweenEstimateAndInclusion_everyKind_partyAndThirdParty() public {
+        uint8[4] memory kinds = [DIRECT, DIRECT, MINT, MERGE];
+        uint256[4] memory makers = [uint256(1), 3, 0, 0];
+        for (uint256 k; k < 4; ++k) {
+            for (uint256 w; w < 3; ++w) {
+                _runFullMerge(kinds[k], makers[k], 7 + k, w);
+            }
+        }
+        // 12 cases: the third party settles in all 4 kinds; a selling party may fail on its own shares, a buying one never
+        assertEq(fullMergeSettled + fullMergeOwnSellFailures, 12, "every case ran");
+        assertGe(fullMergeSettled, 8, "too few full-merge cases settled to prove the bound");
+    }
+
+    /// @dev The hash of party `w`'s order in the built call (0 the taker, else maker w - 1).
+    function _orderHashOf(uint256 w) internal view returns (bytes32) {
+        bytes memory d = data;
+        bytes memory args = new bytes(d.length - 4);
+        for (uint256 i; i < args.length; ++i) {
+            args[i] = d[i + 4];
+        }
+        (X.Order memory t,, X.Order[] memory ms,,,) =
+            abi.decode(args, (X.Order, bytes, X.Order[], bytes[], uint128[], uint128));
+        return _hash(w == 0 ? t : ms[w - 1]);
+    }
+
+    /// @dev `w`: 0 the taker, 1 the first maker, 2 the last third party.
+    function _runFullMerge(uint8 kindId, uint256 nM, uint256 seed, uint256 w) internal {
+        _build(kindId, nM, seed);
+        address a = w == 2 ? ps[ps.length - 1].a : ps[w].a;
+        uint256 sets = 3 * SHARE;
+        usd.mint(a, sets);
+        vm.prank(a);
+        usd.approve(address(ex), sets);
+        require(_try(a, abi.encodeCall(ex.deposit, (sets))), "fixture: deposit");
+        require(
+            _try(a, abi.encodeCall(ex.mintSets, (M, sets))), "fixture: the wallet holds complete sets at the estimate"
+        );
+        uint256 s0 = vm.snapshotState();
+        (bool ok0, uint256 est) = _gas(data);
+        require(ok0, "fixture: the estimate call must settle");
+        vm.revertToState(s0);
+
+        uint256 merged = _fullMerge(a);
+        assertGe(merged, sets, "the full merge did not run");
+        uint256 nOpt = ex.marketOf(M).nOptions;
+        uint256 least = type(uint256).max;
+        for (uint256 o; o < nOpt; ++o) {
+            uint256 h = ex.positionOf(M, uint8(o), a);
+            if (h < least) least = h;
+        }
+        assertLt(least, LOT, "a complete set is left after the full merge");
+
+        (bool okA, uint256 used) = _gas(data);
+        if (!okA) {
+            // allowed only when the merge took the shares this wallet's own order sells: then the call fails with that
+            // order's InsufficientShares (the settler's simulation fails, it is not an out-of-gas), and nothing else
+            require(w != 2, "a third party's full merge made the call fail");
+            vm.prank(operator);
+            (, bytes memory err) = address(ex).call(data);
+            assertEq(
+                bytes4(err), X.InsufficientShares.selector, "the call failed after the full merge for another reason"
+            );
+            assertEq(
+                keccak256(err),
+                keccak256(abi.encodeWithSelector(X.InsufficientShares.selector, _orderHashOf(w))),
+                "not this wallet's own order"
+            );
+            ++fullMergeOwnSellFailures;
+            return;
+        }
+        ++fullMergeSettled;
+        assertLe(
+            used, est + TOL_PER_PARTY * (ps.length - 2), "a full merge made matchOrders dearer than at the estimate"
+        );
     }
 
     function _try(address from, bytes memory cd) internal returns (bool ok) {

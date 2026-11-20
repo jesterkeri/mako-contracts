@@ -523,7 +523,9 @@
           "testFuzz_gasMonotone_merge",
           "test_gasMonotone_merge_codexR14Counterexample",
           "testFuzz_noAmountSlotReturnsToZero",
-          "test_gasSchedule_isTheOneThisRunExpects"
+          "test_gasSchedule_isTheOneThisRunExpects",
+          "test_gasMonotone_generator_reachesFullMerge_byPartyAndByThirdParty",
+          "test_gasMonotone_fullMergeBetweenEstimateAndInclusion_everyKind_partyAndThirdParty"
         ],
         "note": "Plan 3.1 rule 4 (r31 d6, d7): a party's or third party's own actions between estimate and inclusion raise matchOrders gas by at most 3,000 per party. Not an invariant of INVARIANTS.md: added so the gate fails if this property test is removed."
       }
