@@ -67,7 +67,7 @@ contract FuzzTest is Scene {
                     ms[i].option = to.option;
                     ms[i].isBuy = !to.isBuy;
                 } else {
-                    ms[i].option = uint8((to.option + 1 + i) % 3);
+                    ms[i].option = uint8((uint256(to.option) + 1 + i) % 3);
                     ms[i].isBuy = to.isBuy;
                 }
             }
