@@ -6,6 +6,9 @@ solc_version = "0.8.24"
 optimizer = true
 optimizer_runs = 200
 via_ir = true
+# OpenZeppelin Contracts, git submodule lib/openzeppelin-contracts pinned to release v5.7.0, commit
+# cab19933c33c2ad1d4c7a84864a3601dddfd16f3 (OFFCHAIN_MATCHING_PLAN.md 4.1, 4.2). Used by MakoOutcomeExchangeV1 only.
+remappings = ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"]
 
 # Read-only, and only the fixtures directory. Without this `vm.readFile` on the vendored
 # reports and the rule-case corpus is denied and the suite fails on its first run. `ffi`
@@ -26,6 +29,9 @@ solc_version = "0.8.24"
 optimizer = true
 optimizer_runs = 200
 via_ir = true
+# OpenZeppelin Contracts, git submodule lib/openzeppelin-contracts pinned to release v5.7.0, commit
+# cab19933c33c2ad1d4c7a84864a3601dddfd16f3 (OFFCHAIN_MATCHING_PLAN.md 4.1, 4.2). Used by MakoOutcomeExchangeV1 only.
+remappings = ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"]
 fs_permissions = [{ access = "read", path = "./test/fixtures" }, { access = "read-write", path = "./deployments" }, { access = "read", path = "./broadcast" }]
 verbosity = 3
 
