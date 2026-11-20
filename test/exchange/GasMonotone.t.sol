@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity 0.8.24;
 
+import {Vm} from "forge-std/Vm.sol";
 import {ExchangeBase} from "./ExchangeBase.sol";
 import {MakoOutcomeExchangeV1 as X} from "../../src/MakoOutcomeExchangeV1.sol";
 
@@ -301,8 +302,12 @@ contract GasMonotoneTest is ExchangeBase {
             uint256 have = ex.positionOf(M, s.option, a);
             if (have < s.fill) {
                 uint256 need = s.fill - have + ((r >> 30) & 3 == 0 ? 0 : _amt(r >> 34));
-                if (seeded) _seed(a, s.option, need);
-                else _mint(a, M, need);
+                if (seeded) {
+                    _seed(a, s.option, need);
+                    if ((r >> 46) & 1 == 1) _touchNet(a); // half of them have a record at zero
+                } else {
+                    _mint(a, M, need);
+                }
             }
         }
     }
@@ -333,6 +338,15 @@ contract GasMonotoneTest is ExchangeBase {
         vm.store(address(ex), s2, bytes32(uint256(vm.load(address(ex), s2)) + n));
     }
 
+    uint256 internal constant REC_SLOT = 11; // `_rec`
+
+    /// @dev `a`'s per-market record exists with a net of zero (net is stored as net + 1, so the slot holds 1): a wallet that
+    /// traded its way back to zero, as opposed to one that never traded.
+    function _touchNet(address a) internal {
+        bytes32 key = keccak256(abi.encode(M, a));
+        vm.store(address(ex), keccak256(abi.encode(key, REC_SLOT)), bytes32(uint256(1)));
+    }
+
     function test_seedHelper_matchesTheContractsStorageLayout() public {
         M = _market(3);
         (address a,) = makeAddrAndKey("seedCheck");
@@ -357,6 +371,20 @@ contract GasMonotoneTest is ExchangeBase {
         assertEq(ex.marketOf(M).collateral, 10 * SHARE);
         (uint256 net,) = ex.recOf(M, b);
         assertEq(net, 0, "and has no net");
+        // a touched record reads back as net 0 and is non-zero in storage
+        _touchNet(b);
+        bytes32 recSlot = keccak256(abi.encode(keccak256(abi.encode(M, b)), REC_SLOT));
+        assertEq(uint256(vm.load(address(ex), recSlot)), 1);
+        (net,) = ex.recOf(M, b);
+        assertEq(net, 0);
+        // and a real mint writes the record at exactly that slot (net + 1 in the low half)
+        _mint(a, M, 2 * SHARE);
+        bytes32 aRec = keccak256(abi.encode(keccak256(abi.encode(M, a)), REC_SLOT));
+        assertEq(
+            uint256(uint128(uint256(vm.load(address(ex), aRec)))),
+            9 * SHARE + 1,
+            "net is the low half of the record, plus one"
+        );
     }
 
     // ------------------------------------------------------------------------------------------------ fixed scenarios
@@ -382,6 +410,7 @@ contract GasMonotoneTest is ExchangeBase {
         _deposit(t, 100e6);
         _deposit(s, 1e6);
         _seed(s, 0, 10 * SHARE);
+        _touchNet(s); // a record at net zero, so the record slot costs the same before and after the mint
         X.Order memory to = _order(t, M, 0, true, 70, 10 * SHARE);
         X.Order[] memory ms = _one(_order(s, M, 0, false, 40, 10 * SHARE));
         data = abi.encodeCall(
@@ -397,6 +426,48 @@ contract GasMonotoneTest is ExchangeBase {
         (bool ok1, uint256 used) = _gas(data);
         require(ok1, "fixture: the call after the action must settle");
         assertLe(used, est + TOL_PER_PARTY * 2, "a party's own mint made matchOrders dearer than at the estimate");
+    }
+
+    /// @dev Rule 2 as a count: `matchOrders` makes the same number of storage writes whether or not the seller's receipt is
+    /// held. One seller's net covers its receipt (everything to free cash, nothing held); another's is zero (everything
+    /// held, nothing to free cash). A write guarded by "something goes to free cash" or "something is held" differs.
+    function test_gasMonotone_rule2_sameWritesWhetherOrNotAReceiptIsHeld() public {
+        uint256 covered = _sellerMatchWrites(false);
+        uint256 held = _sellerMatchWrites(true);
+        assertEq(held, covered, "the number of storage writes depends on a party's net");
+        assertGt(covered, 8, "the count is of real settlement writes");
+    }
+
+    function _sellerMatchWrites(bool sellerHoldsReceipt) internal returns (uint256 n) {
+        delete ps;
+        M = _market(2);
+        string memory tag = sellerHoldsReceipt ? "w-held" : "w-free";
+        (address t, uint256 tk) = _pair(string.concat(tag, "-taker"));
+        (address s, uint256 sk) = _pair(string.concat(tag, "-seller"));
+        _deposit(t, 100e6);
+        _deposit(s, 1e6);
+        if (sellerHoldsReceipt) {
+            _seed(s, 0, 10 * SHARE);
+            _touchNet(s); // a record at net zero: the whole 4 USDC receipt is held
+        } else {
+            _mint(s, M, 10 * SHARE); // net 10: the 4 USDC receipt is all free cash
+        }
+        X.Order memory to = _order(t, M, 0, true, 70, 10 * SHARE);
+        X.Order[] memory ms = _one(_order(s, M, 0, false, 40, 10 * SHARE));
+        bytes memory d = abi.encodeCall(
+            X.matchOrders, (to, _sign(tk, to), ms, _oneSig(_sign(sk, ms[0])), _oneFill(10 * SHARE), uint128(10 * SHARE))
+        );
+        vm.startStateDiffRecording();
+        vm.prank(operator);
+        (bool ok,) = address(ex).call(d);
+        Vm.AccountAccess[] memory acc = vm.stopAndReturnStateDiff();
+        require(ok, "fixture: the match must settle");
+        for (uint256 i; i < acc.length; ++i) {
+            for (uint256 j; j < acc[i].storageAccesses.length; ++j) {
+                Vm.StorageAccess memory sa = acc[i].storageAccesses[j];
+                if (sa.account == address(ex) && sa.isWrite) ++n;
+            }
+        }
     }
 
     /// @dev Rule 3: the market slot the settlement writes is never zero while the market trades. A mint match writes
