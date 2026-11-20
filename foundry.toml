@@ -15,7 +15,7 @@ remappings = ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"]
 # stays off. `./deployments` is read-write so DeployRoundsV1 can write its deployment receipt (and tests read it back) on a
 # broadcast, and nothing else. `./broadcast` is readable so `verifyDeployment` can bind the address to
 # the script's own CREATE transaction in forge's broadcast record.
-fs_permissions = [{ access = "read", path = "./test/fixtures" }, { access = "read-write", path = "./deployments" }, { access = "read", path = "./broadcast" }]
+fs_permissions = [{ access = "read", path = "./test/fixtures" }, { access = "read", path = "./test/vectors" }, { access = "read-write", path = "./deployments" }, { access = "read", path = "./broadcast" }]
 
 # CI already sets FOUNDRY_PROFILE: ci (.github/workflows/test.yml), but no such profile
 # existed, so CI silently ran the default profile. It inherits the default and exists so
@@ -32,7 +32,7 @@ via_ir = true
 # OpenZeppelin Contracts, git submodule lib/openzeppelin-contracts pinned to release v5.7.0, commit
 # cab19933c33c2ad1d4c7a84864a3601dddfd16f3 (OFFCHAIN_MATCHING_PLAN.md 4.1, 4.2). Used by MakoOutcomeExchangeV1 only.
 remappings = ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"]
-fs_permissions = [{ access = "read", path = "./test/fixtures" }, { access = "read-write", path = "./deployments" }, { access = "read", path = "./broadcast" }]
+fs_permissions = [{ access = "read", path = "./test/fixtures" }, { access = "read", path = "./test/vectors" }, { access = "read-write", path = "./deployments" }, { access = "read", path = "./broadcast" }]
 verbosity = 3
 
 [rpc_endpoints]

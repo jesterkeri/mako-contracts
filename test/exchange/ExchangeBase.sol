@@ -25,6 +25,9 @@ abstract contract ExchangeBase is Test {
     /// @dev Key of every party made by `_party`, so a test can change an order and sign it again.
     mapping(address => uint256) internal keyOf;
 
+    // The chain id is read with `vm.getChainId()` everywhere in these suites: the optimizer treats `block.chainid` as a
+    // constant and would reuse a value read before a `vm.chainId` change.
+
     /// @dev A whole `matchOrders` argument list.
     struct Call {
         X.Order t;
@@ -100,13 +103,13 @@ abstract contract ExchangeBase is Test {
 
     function _domainSeparator() internal view returns (bytes32) {
         return keccak256(
-            abi.encode(DOMAIN_TYPEHASH, keccak256("Mako Market Exchange"), keccak256("1"), block.chainid, address(ex))
+            abi.encode(DOMAIN_TYPEHASH, keccak256("Mako Market Exchange"), keccak256("1"), vm.getChainId(), address(ex))
         );
     }
 
     function _hashFor(address verifying, X.Order memory o) internal view returns (bytes32) {
         bytes32 sep = keccak256(
-            abi.encode(DOMAIN_TYPEHASH, keccak256("Mako Market Exchange"), keccak256("1"), block.chainid, verifying)
+            abi.encode(DOMAIN_TYPEHASH, keccak256("Mako Market Exchange"), keccak256("1"), vm.getChainId(), verifying)
         );
         bytes32 structHash = keccak256(
             abi.encode(

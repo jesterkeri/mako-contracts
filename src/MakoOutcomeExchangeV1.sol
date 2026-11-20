@@ -345,7 +345,8 @@ contract MakoOutcomeExchangeV1 is EIP712 {
     }
 
     function acceptAdmin() external {
-        if (msg.sender != pendingAdmin) revert NotAdmin();
+        // nobody can accept when none is pending (the zero address would otherwise equal the cleared slot)
+        if (pendingAdmin == address(0) || msg.sender != pendingAdmin) revert NotAdmin();
         admin = msg.sender;
         pendingAdmin = address(0);
         emit AdminTransferred(msg.sender);

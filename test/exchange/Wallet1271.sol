@@ -13,6 +13,8 @@ contract Wallet1271 {
         BOMB, // returns the magic word in front of ~190 KB, within the 100,000 gas
         NEEDS_MORE_GAS, // approves only with more than SIG_GAS: never, under the bound
         NEEDS_95K, // approves with more than 95,000 gas left: yes, under the bound
+        NEEDS_NEAR_ALL, // approves with more than 96,000 gas left: yes with the exact bound, no if it is trimmed
+        GAS_ECHO, // returns gasleft() as the word: measures what the wallet is given
         DIRTY_TAIL, // magic in the first 4 bytes, garbage after: not the exact word
         ALWAYS_OK, // magic for anything: a lying wallet, safe only because the maker signed
         TWO_WORDS // magic word then a second word: accepted, only 32 bytes are read
@@ -53,6 +55,13 @@ contract Wallet1271 {
         }
         if (m == Mode.NEEDS_MORE_GAS) return gasleft() > 100_000 ? bytes4(0x1626ba7e) : bytes4(0xffffffff);
         if (m == Mode.NEEDS_95K) return gasleft() > 95_000 ? bytes4(0x1626ba7e) : bytes4(0xffffffff);
+        if (m == Mode.NEEDS_NEAR_ALL) return gasleft() > 96_000 ? bytes4(0x1626ba7e) : bytes4(0xffffffff);
+        if (m == Mode.GAS_ECHO) {
+            assembly {
+                mstore(0, gas())
+                return(0, 32)
+            }
+        }
         if (m == Mode.DIRTY_TAIL) {
             assembly {
                 mstore(0, or(shl(224, 0x1626ba7e), 1))
