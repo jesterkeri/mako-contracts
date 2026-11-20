@@ -253,5 +253,279 @@
       ],
       "note": "test_StartTimeOnMinute checks a minute +/- 1 second, which a 30-second step would also pass; test_HalfMinuteIsRejected (added after the T1.4 adversary pass) rejects hh:mm:30."
     }
+  },
+  "exchange": {
+    "$comment": [
+      "OFFCHAIN_MATCHING_PLAN.md 10.2 for MakoOutcomeExchangeV1: X1 to X12 and X15 to X20 of MAKO_POOLS_PLAN 9.3 as reworded there, O1 to O13, plus G1.",
+      "X13, X14 and X21 are book-only and are removed with the book. O14 (and everything of plan 4.5) exists only with the registered order signer, which this build does not carry.",
+      "script/check-invariants.mjs checks every named test is a real public test or invariant function in test/exchange/*.t.sol."
+    ],
+    "source": "OFFCHAIN_MATCHING_PLAN.md r31 draft 7, 10.2",
+    "invariants": {
+      "X1": {
+        "tests": [
+          "invariant_X1_X2_X15_conservation",
+          "test_direct_takerBuy_oneMaker_exactAccounting",
+          "test_mint_N3_takerPaysTheRest_makersPayTheirOwnPrices",
+          "test_merge_N3_takerReceivesTheRest_netOfItsFee"
+        ],
+        "note": "Reworded (plan 10.2): shares in balances equal setsOutstanding; there is no ask escrow."
+      },
+      "X2": {
+        "tests": [
+          "invariant_X1_X2_X15_conservation",
+          "test_direct_takerSell_oneMaker_feeComesOutOfTheTakersReceipt",
+          "test_direct_tenMakers"
+        ],
+        "note": "Reworded: no bid escrow; asserted as an equality, since nothing reaches the exchange except through deposit."
+      },
+      "X3": {
+        "tests": [
+          "invariant_X3_X4_X5_X9_X18_X20_everySuccessfulActionDidExactlyItsWork",
+          "test_direct_threeMakers_eachAtItsOwnPrice",
+          "test_step5_priceNotCrossed_directBothSides_andSetKinds",
+          "test_step5_priceNotCrossed_oneBadLegAmongThree"
+        ],
+        "note": "Reads: every fill is within both signed limits."
+      },
+      "X4": {
+        "tests": [
+          "invariant_X3_X4_X5_X9_X18_X20_everySuccessfulActionDidExactlyItsWork",
+          "test_mint_N3_takerPaysTheRest_makersPayTheirOwnPrices",
+          "test_merge_N3_takerReceivesTheRest_netOfItsFee",
+          "test_mint_N3_makerPricesSumToExactly100_takerPaysNothing"
+        ]
+      },
+      "X5": {
+        "tests": [
+          "invariant_X3_X4_X5_X9_X18_X20_everySuccessfulActionDidExactlyItsWork",
+          "testFuzz_feeFormula",
+          "test_feeRoundsUp_neverDown",
+          "test_feeOf_andSplitOf_agreeWithTheChargedFee_X5_X20",
+          "test_createMarket_validation"
+        ]
+      },
+      "X6": {
+        "tests": [
+          "invariant_X6_noFillOrMintAfterCloseWhilePausedOrAfterFinalization",
+          "test_tradingClose_boundary_isExclusive",
+          "test_closeEarly_stopsMatching",
+          "test_pause_stopsMatchingMintingAndNewMarkets_butNotTheRest_X10",
+          "test_mintSets_errors"
+        ]
+      },
+      "X7": {
+        "tests": [
+          "invariant_X7_X10_pauseProofActionsAndCancelAreSound",
+          "test_cancelOrders_marksOnlyTheCallersOrders_andNeedsNoSignature"
+        ],
+        "note": "Reworded: cancel marks only the maker's own orders (no escrow to return)."
+      },
+      "X8": {
+        "tests": [
+          "invariant_X8_statusOnlyMovesForward_aFinalOutcomeNeverChanges",
+          "test_finalize_errors_andEffects_X8_X17"
+        ]
+      },
+      "X9": {
+        "tests": [
+          "invariant_X3_X4_X5_X9_X18_X20_everySuccessfulActionDidExactlyItsWork",
+          "testFuzz_settlementsConserveMoneyAndSets"
+        ],
+        "note": "Every handler action compares ALL four wallets with the expected effect; an uninvolved wallet must not move."
+      },
+      "X10": {
+        "tests": [
+          "invariant_X7_X10_pauseProofActionsAndCancelAreSound",
+          "test_pause_stopsMatchingMintingAndNewMarkets_butNotTheRest_X10",
+          "test_pause_doesNotBlockResolutionOrRedeem_X10",
+          "test_withdraw_neverPausable_X10"
+        ]
+      },
+      "X11": {
+        "tests": [
+          "invariant_X11_X19_backstopAndFinalizeAreNeverBothValid",
+          "test_backstopUnwind_X11_X19"
+        ]
+      },
+      "X12": {
+        "tests": [
+          "invariant_X12_marketTermsNeverChange_tradingCloseOnlyMovesEarlier",
+          "test_createMarket_marketTermsAreStored_X12",
+          "test_closeEarly_adminOrResolver_forwardOnly"
+        ],
+        "scripts": [
+          "script/check-surface-exchange.mjs"
+        ],
+        "note": "check-surface-exchange.mjs: no setter, and no market term written outside createMarket (tradingClose only in closeEarly, forward only)."
+      },
+      "X15": {
+        "tests": [
+          "invariant_X1_X2_X15_conservation"
+        ]
+      },
+      "X16": {
+        "tests": [
+          "invariant_X16_X17_unwindAndReleasePayExactlyOnce",
+          "test_unwind_paysEachWalletItsNet_X16"
+        ]
+      },
+      "X17": {
+        "tests": [
+          "invariant_X16_X17_unwindAndReleasePayExactlyOnce",
+          "test_finalize_winner_releasesFeesToTheTreasuryOnce_andPaysWinners",
+          "test_profitHold_makerSell_receiptAboveNetIsHeld_thenReleasedAtFinalize"
+        ]
+      },
+      "X18": {
+        "tests": [
+          "invariant_X3_X4_X5_X9_X18_X20_everySuccessfulActionDidExactlyItsWork",
+          "test_profitHold_takerSell_splitIsEmittedOnTheLeaf",
+          "test_profitHold_makerSell_receiptAboveNetIsHeld_thenReleasedAtFinalize",
+          "test_profitHold_mergeSets_splitsTheReceipt"
+        ],
+        "note": "Reworded: the Leaf event carries the split the contract applied, and splitOf quotes the same split."
+      },
+      "X19": {
+        "tests": [
+          "invariant_X11_X19_backstopAndFinalizeAreNeverBothValid",
+          "test_backstopUnwind_X11_X19",
+          "test_proposeOutcome_errors"
+        ]
+      },
+      "X20": {
+        "tests": [
+          "invariant_X3_X4_X5_X9_X18_X20_everySuccessfulActionDidExactlyItsWork",
+          "test_feeOf_andSplitOf_agreeWithTheChargedFee_X5_X20",
+          "test_direct_threeMakers_eachAtItsOwnPrice"
+        ],
+        "note": "Reworded: feeOf returns the fee the settlement charges per leaf."
+      },
+      "O1": {
+        "tests": [
+          "invariant_O1_O3_O4_filledOnlyGrows_neverPastSize_noSpentOrOldOrganisedOrder_onlyOperatorsSettle",
+          "test_partialFills_accumulate_thenOverfill",
+          "test_sameMakerOrderAtTwoIndices_neverFillsBeyondItsSize",
+          "test_filledEqualsSize_boundaryIsAllowed_oneLotMoreIsNot"
+        ]
+      },
+      "O2": {
+        "tests": [
+          "test_binding_O2byChain_theSeparatorFollowsBlockChainid",
+          "test_vectors_O2byChain_eachSetIsRefusedOnTheOtherChain",
+          "test_binding_aSignatureForAnotherExchangeIsRefused",
+          "test_ecdsa_everyFieldIsSigned",
+          "test_step5_marketMismatch_beforeEveryLaterCheck",
+          "test_vectors_negativesRevertExactly_registeredOnesAtTheTaker"
+        ]
+      },
+      "O3": {
+        "tests": [
+          "invariant_O1_O3_O4_filledOnlyGrows_neverPastSize_noSpentOrOldOrganisedOrder_onlyOperatorsSettle",
+          "test_cancelled_neverFills_evenAfterAPartialFill",
+          "test_incrementNonce_voidsEveryOlderOrder",
+          "test_nonceCannotBeSignedAhead"
+        ]
+      },
+      "O4": {
+        "tests": [
+          "test_matchOrders_operatorOnly_O4",
+          "invariant_O1_O3_O4_filledOnlyGrows_neverPastSize_noSpentOrOldOrganisedOrder_onlyOperatorsSettle"
+        ],
+        "scripts": [
+          "script/check-surface-exchange.mjs"
+        ],
+        "note": "check-surface-exchange.mjs: isOperator[msg.sender] appears exactly once, inside matchOrders."
+      },
+      "O5": {
+        "tests": [
+          "test_O5_operatorAdminResolverTreasury_areRefused_asTakerAndAsMaker",
+          "test_O5_theRolesAreReadAtTheTimeOfTheCall",
+          "test_O5_residual_aFreshUnlistedWallet_isNotRefused_andSettlesAgainstAUser",
+          "test_O5_residual_aFormerResolverAndAFormerAdminAreNotRefused"
+        ],
+        "note": "Proves the enforced refusal only; the fresh-wallet, former-role and removed-operator tests document the residual (plan 3.4). The one-owner Safe variant of the fresh wallet is covered by the vector file's Safe parties."
+      },
+      "O6": {
+        "tests": [
+          "test_selfMatch_otherOrderOfTheSameWallet_everyKind",
+          "test_step5_fillMismatch_beforeSelfMatch",
+          "test_takersOwnOrderAsMaker_isWrongKind"
+        ]
+      },
+      "O7": {
+        "tests": [
+          "test_1271_onlyTheExactMagic_O7",
+          "test_1271_honestWallet_asMakerAndAsTaker"
+        ]
+      },
+      "O8": {
+        "tests": [
+          "test_O8_setOperator_refusesAdmin_pendingAdmin_resolver_treasury",
+          "test_O8_setResolver_andTransferAdmin_refuseAnOperator",
+          "test_O8_operatorCanCallNothingElsePrivileged",
+          "invariant_O8_noOperatorHoldsASecondRole"
+        ],
+        "scripts": [
+          "script/check-surface-exchange.mjs"
+        ]
+      },
+      "O9": {
+        "tests": [
+          "test_1271_noCallReceivesMoreThanSigGas_O9",
+          "test_1271_tooLittleGas_revertsInsufficientGas_neverReportsABadSignature_O9",
+          "test_1271_insufficientGasInMatchOrders_isTheNamedError",
+          "test_1271_aGasBurner_isBadSignature_andCostsAtMostSigGas_O9",
+          "test_1271_returnDataIsNeverCopied_aBombCostsOnlyWhatTheWalletSpends",
+          "test_step4_everySignatureIsCheckedBeforeAnyWrite"
+        ]
+      },
+      "O10": {
+        "tests": [
+          "test_length_195_isTheMaximum_196Rejected_boundary",
+          "test_length_rejectedBeforeAnyCall_aBurningWalletIsNeverCalled",
+          "test_step2_lengthMismatch_sigsAndFills_beforeAnySignatureIsRead",
+          "test_step2_badMakerCount_beforeLengthMismatch",
+          "test_step2_tooManyMakers_isBadMakerCount_boundaryIsTen",
+          "test_step4_makersInIndexOrder",
+          "testFuzz_signatureLengthRule"
+        ]
+      },
+      "O11": {
+        "tests": [
+          "test_positionCap_makerLegSeesEarlierLegs",
+          "test_positionCap_twoOrdersOfOneWalletInOneCall"
+        ]
+      },
+      "O12": {
+        "tests": [
+          "invariant_X3_X4_X5_X9_X18_X20_everySuccessfulActionDidExactlyItsWork",
+          "test_step5_fillMismatch_perKindRules",
+          "test_mint_N3_takerPaysTheRest_makersPayTheirOwnPrices",
+          "test_merge_N3_takerReceivesTheRest_netOfItsFee"
+        ]
+      },
+      "O13": {
+        "tests": [
+          "testFuzz_O13_matchOrdersNeverPanics",
+          "testFuzz_O13_isValidOrderSignatureNeverPanics",
+          "test_step5_setPriceSum_tenMakersAt99_doesNotWrapOrPanic",
+          "test_unknownMarket_isTradingClosed_neverAPanic"
+        ]
+      },
+      "G1": {
+        "tests": [
+          "testFuzz_gasMonotone_direct1",
+          "testFuzz_gasMonotone_direct2",
+          "testFuzz_gasMonotone_direct3",
+          "testFuzz_gasMonotone_direct10",
+          "testFuzz_gasMonotone_mint",
+          "testFuzz_gasMonotone_merge",
+          "test_gasMonotone_merge_codexR14Counterexample",
+          "testFuzz_noAmountSlotReturnsToZero"
+        ],
+        "note": "Plan 3.1 rule 4 (r31 d6, d7): a party's or third party's own actions between estimate and inclusion raise matchOrders gas by at most 3,000 per party. Not an invariant of INVARIANTS.md: added so the gate fails if this property test is removed."
+      }
+    }
   }
 }

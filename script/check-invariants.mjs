@@ -16,7 +16,7 @@
 // and a test declared in an abstract contract that forge never runs; hence the kind rules below. It proves the map
 // points at real evidence; that each test can FAIL for its invariant is script/mutate-solidity.mjs's job.
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -116,6 +116,48 @@ for (const [id, e] of Object.entries(map.invariants)) {
   if (!runsInCi && !e.deferred) problems.push(`${id}: no evidence that runs in CI (fork tests skip offline) and no deferral`);
 }
 
+
+// ---- MakoOutcomeExchangeV1 (OFFCHAIN_MATCHING_PLAN.md 10.2): the same rules over test/exchange/*.t.sol ----
+// X1 to X12 and X15 to X20 as reworded there, O1 to O13, and G1 (the gas-monotone property). X13, X14, X21 are book-only;
+// O14 exists only with the registered order signer, which this build does not carry. Held HERE, as above.
+const EXCHANGE_EXPECTED = ['X1', 'X2', 'X3', 'X4', 'X5', 'X6', 'X7', 'X8', 'X9', 'X10', 'X11', 'X12', 'X15', 'X16', 'X17', 'X18',
+  'X19', 'X20', 'O1', 'O2', 'O3', 'O4', 'O5', 'O6', 'O7', 'O8', 'O9', 'O10', 'O11', 'O12', 'O13', 'G1'];
+const EXCHANGE_SCRIPT_FOR = { X12: ['script/check-surface-exchange.mjs'], O4: ['script/check-surface-exchange.mjs'], O8: ['script/check-surface-exchange.mjs'] };
+const exchangeMap = map.exchange;
+let exchangeRefs = 0;
+if (!exchangeMap) {
+  problems.push('the invariant coverage map has no "exchange" section for MakoOutcomeExchangeV1');
+} else {
+  const exTests = new Map();
+  const files = readdirSync(join(REPO, 'test/exchange')).filter((f) => f.endsWith('.t.sol')).sort();
+  for (const f of files) {
+    const code = clean(readFileSync(join(REPO, 'test/exchange', f), 'utf8'));
+    const decls = [...code.matchAll(/\b(abstract\s+)?(contract|library|interface)\s+[A-Za-z0-9_]+/g)];
+    decls.forEach((d, i) => {
+      if (d[1] || d[2] !== 'contract') return;
+      const body = code.slice(d.index, i + 1 < decls.length ? decls[i + 1].index : code.length);
+      for (const m of body.matchAll(/function\s+((?:test|invariant_)[A-Za-z0-9_]*)\s*\([^)]*\)\s*(?:public|external)\b/g)) exTests.set(m[1], f);
+    });
+  }
+  const exIds = Object.keys(exchangeMap.invariants);
+  for (const id of EXCHANGE_EXPECTED) if (!exIds.includes(id)) problems.push(`exchange ${id}: expected but has no entry`);
+  for (const id of exIds) if (!EXCHANGE_EXPECTED.includes(id)) problems.push(`exchange ${id}: has an entry but is not an expected invariant`);
+  for (const [id, e] of Object.entries(exchangeMap.invariants)) {
+    const t = e.tests || [], sc = e.scripts || [];
+    for (const name of t) {
+      exchangeRefs++;
+      if (!exTests.has(name)) problems.push(`exchange ${id}: ${name} is not a public test or invariant function in test/exchange/*.t.sol`);
+    }
+    for (const p of sc) {
+      exchangeRefs++;
+      if (!existsSync(join(REPO, p))) problems.push(`exchange ${id}: script ${p} does not exist`);
+      if (!(EXCHANGE_SCRIPT_FOR[id] || []).includes(p)) problems.push(`exchange ${id}: ${p} is not a check for this invariant`);
+      if (!ranInCi(p)) problems.push(`exchange ${id}: ${p} is not run by CI`);
+    }
+    if (!t.some((n) => exTests.has(n))) problems.push(`exchange ${id}: no test evidence`);
+  }
+}
+
 if (problems.length) {
   console.error('INVARIANT COVERAGE MAP IS WRONG:');
   for (const p of problems) console.error(`  - ${p}`);
@@ -123,4 +165,5 @@ if (problems.length) {
 }
 console.log(`invariant coverage: ${ids.length} contract-enforced invariants, ${testRefs} test, ${rowRefs} corpus-row and ${scriptRefs} script references, all real.`);
 console.log(`  ${designNote}.`);
+console.log(`exchange coverage: ${EXCHANGE_EXPECTED.length} invariants of MakoOutcomeExchangeV1, ${exchangeRefs} test and script references, all real.`);
 console.log(`  deferred with an owner: ${deferred.join(', ') || 'none'}`);

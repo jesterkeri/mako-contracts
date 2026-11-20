@@ -87,6 +87,12 @@ jobs:
       - name: The surface gate refuses overloads and other crafted ABIs
         run: node script/check-surface.test.mjs
 
+      - name: MakoOutcomeExchangeV1 surface is exactly the allowlist (three Order functions, no registered signer, operator gate only in matchOrders)
+        run: node script/check-surface-exchange.mjs
+
+      - name: The exchange surface gate refuses changed ABIs and changed source
+        run: node script/check-surface-exchange.test.mjs
+
   # The Solidity mutation sweep compiles the contract once per mutant under via_ir, which cannot be turned
   # off (stack too deep), so it is the slow gate. It runs on pull requests (before anything reaches main) and
   # on demand, not on every push; every other gate above still runs on every push.
