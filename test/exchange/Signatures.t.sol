@@ -83,6 +83,23 @@ contract SignaturesTest is Scene {
         _expectNoWrite(_e(X.BadSignature.selector, _hash(c.ms[0])), _data(c));
     }
 
+    function test_ecdsa_theZeroAddressIsNeverAValidMaker_anInvalidSignatureRecoversToZero() public {
+        // ecrecover returns address(0) for a signature that recovers nothing; an order whose maker is address(0) must not
+        // be accepted on that: the recovery error is checked, not only the address
+        bytes memory junk = abi.encodePacked(bytes32(uint256(1)), bytes32(uint256(2)), uint8(27));
+        Call memory c = _dBuy1(10e6);
+        c.ms[0].maker = address(0);
+        c.mss[0] = junk;
+        _expectNoWrite(_e(X.BadSignature.selector, _hash(c.ms[0])), _data(c));
+        c = _dBuy1(10e6);
+        c.t.maker = address(0);
+        c.ts = junk;
+        _expectNoWrite(_e(X.BadSignature.selector, _hash(c.t)), _data(c));
+        assertFalse(ex.isValidOrderSignature(c.ms[0], junk));
+        // and a signature of the wrong length for a zero maker, which has no code
+        assertFalse(ex.isValidOrderSignature(c.t, hex"01"));
+    }
+
     function test_ecdsa_malleableAndMalformedSignaturesAreRefused() public {
         Call memory c = _dBuy1(10e6);
         bytes memory good = c.mss[0];

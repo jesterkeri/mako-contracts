@@ -35,5 +35,12 @@ remappings = ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"]
 fs_permissions = [{ access = "read", path = "./test/fixtures" }, { access = "read", path = "./test/vectors" }, { access = "read-write", path = "./deployments" }, { access = "read", path = "./broadcast" }]
 verbosity = 3
 
+# Monad's gas schedule (cold storage and account accesses cost more, a different cold/warm gap). Used ONLY for
+# test/exchange/GasMonotone.t.sol: the plan's per-party 3,000-gas bound (OFFCHAIN_MATCHING_PLAN.md 3.1 rule 4) was measured
+# on this schedule, and a skipped cash write is invisible to the bound under Ethereum's. Run it with
+#   FOUNDRY_PROFILE=monad forge test --match-path test/exchange/GasMonotone.t.sol
+[profile.monad]
+network = "monad"
+
 [rpc_endpoints]
 monad_testnet = "https://testnet-rpc.monad.xyz/"

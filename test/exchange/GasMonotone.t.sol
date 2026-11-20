@@ -277,7 +277,11 @@ contract GasMonotoneTest is ExchangeBase {
     function _fund(address a, Spec memory s, uint256 r) internal {
         // 1 mint, 2 mint+merge (touched, net 0), 3 mint+partial merge; 0 (untouched, rarely) can only make the later
         // call cheaper, so most parties start with every settlement slot already non-zero, the costly baseline
-        uint256 prelude = r % 16 == 0 ? 0 : 1 + (r >> 4) % 3;
+        // Two in three sellers hold SEEDED shares: shares in storage with no net record and no cash slot of their own, as a
+        // seller whose net is zero has (the plan's "first position of every party", and the case that makes a skipped cash
+        // write visible). The others get theirs by minting, which leaves a net record behind.
+        bool seeded = !s.isBuy && (r >> 40) % 3 != 0;
+        uint256 prelude = r % 16 == 0 || seeded ? 0 : 1 + (r >> 4) % 3;
         uint256 mintAmt = _amt(r >> 8);
         uint256 cashAmt = s.isBuy ? s.pay + ((r >> 16) & 1 == 1 ? 0 : _amt(r >> 20)) : _amt(r >> 21);
         if (prelude != 0) cashAmt += mintAmt;
@@ -297,9 +301,162 @@ contract GasMonotoneTest is ExchangeBase {
             uint256 have = ex.positionOf(M, s.option, a);
             if (have < s.fill) {
                 uint256 need = s.fill - have + ((r >> 30) & 3 == 0 ? 0 : _amt(r >> 34));
-                _mint(a, M, need);
+                if (seeded) _seed(a, s.option, need);
+                else _mint(a, M, need);
             }
         }
+    }
+
+    // ------------------------------------------------------------------------------------------------ seeding by storage
+    // `_sharesS` is storage slot 10 and `_markets` slot 8 (the surface gate pins the layout); `test_seedHelper_...` checks
+    // both against the real functions, so a layout change fails there first.
+    uint256 internal constant SHARES_SLOT = 10;
+    uint256 internal constant MARKETS_SLOT = 8;
+
+    function _shareSlot(uint256 m, uint8 option, address a) internal pure returns (bytes32) {
+        return keccak256(abi.encode(keccak256(abi.encode(m, uint256(option), a)), SHARES_SLOT));
+    }
+
+    function _marketSlot(uint256 m, uint256 offset) internal pure returns (bytes32) {
+        return bytes32(uint256(keccak256(abi.encode(m, MARKETS_SLOT))) + offset);
+    }
+
+    /// @dev `n` shares of one option for `a`, written straight to storage (stored as amount + 1), with the market's sets
+    /// outstanding and collateral raised by `n` so a merge in the same market stays backed.
+    function _seed(address a, uint8 option, uint256 n) internal {
+        bytes32 slot = _shareSlot(M, option, a);
+        uint256 cur = uint256(vm.load(address(ex), slot));
+        vm.store(address(ex), slot, bytes32((cur == 0 ? 1 : cur) + n));
+        bytes32 s1 = _marketSlot(M, 1); // positionCap (low 128), setsOutstanding (high 128)
+        vm.store(address(ex), s1, bytes32(uint256(vm.load(address(ex), s1)) + (n << 128)));
+        bytes32 s2 = _marketSlot(M, 2); // collateral (low 128), feesHeld, markA
+        vm.store(address(ex), s2, bytes32(uint256(vm.load(address(ex), s2)) + n));
+    }
+
+    function test_seedHelper_matchesTheContractsStorageLayout() public {
+        M = _market(3);
+        (address a,) = makeAddrAndKey("seedCheck");
+        _mint(a, M, 7 * SHARE);
+        assertEq(
+            uint256(vm.load(address(ex), _shareSlot(M, 1, a))), 7 * SHARE + 1, "_sharesS holds amount + 1 at slot 10"
+        );
+        assertEq(
+            uint256(vm.load(address(ex), _marketSlot(M, 1))) >> 128,
+            7 * SHARE,
+            "setsOutstanding is the high half of the market's slot 1"
+        );
+        assertEq(
+            uint128(uint256(vm.load(address(ex), _marketSlot(M, 2)))),
+            7 * SHARE,
+            "collateral is the low half of the market's slot 2"
+        );
+        (address b,) = makeAddrAndKey("seedCheck2");
+        _seed(b, 2, 3 * SHARE);
+        assertEq(ex.positionOf(M, 2, b), 3 * SHARE, "a seeded position reads back as its amount");
+        assertEq(ex.marketOf(M).setsOutstanding, 10 * SHARE);
+        assertEq(ex.marketOf(M).collateral, 10 * SHARE);
+        (uint256 net,) = ex.recOf(M, b);
+        assertEq(net, 0, "and has no net");
+    }
+
+    // ------------------------------------------------------------------------------------------------ fixed scenarios
+    // The fuzz hunts; these pin the two rules by name, so a mutant that removes one dies on a fixed scenario and not only
+    // when a seed happens to reach it. (Both need the Monad schedule to see the whole cost: see foundry.toml, profile monad.)
+
+    function _pair(string memory name) internal returns (address a, uint256 k) {
+        (a, k) = makeAddrAndKey(name);
+        ps.push(Party(a, k));
+    }
+
+    /// @dev Rule 2: no write is skipped because of a party-controlled value. The maker seller holds seeded shares and has
+    /// a net of zero, so its receipt goes entirely to the hold at the estimate; before inclusion it mints sets of its own
+    /// (net above zero), so the same receipt now reaches free cash. A cash write guarded by "something goes to free cash"
+    /// would be skipped at the estimate and made at inclusion.
+    function test_gasMonotone_rule2_sellerWithNoNetThenMints_cashWriteIsUnconditional() public {
+        delete ps;
+        M = _market(2);
+        (address t, uint256 tk) = _pair("r2-taker");
+        (address s, uint256 sk) = _pair("r2-seller");
+        _pair("r2-third-a");
+        _pair("r2-third-b");
+        _deposit(t, 100e6);
+        _deposit(s, 1e6);
+        _seed(s, 0, 10 * SHARE);
+        X.Order memory to = _order(t, M, 0, true, 70, 10 * SHARE);
+        X.Order[] memory ms = _one(_order(s, M, 0, false, 40, 10 * SHARE));
+        data = abi.encodeCall(
+            X.matchOrders, (to, _sign(tk, to), ms, _oneSig(_sign(sk, ms[0])), _oneFill(10 * SHARE), uint128(10 * SHARE))
+        );
+        uint256 snap = vm.snapshotState();
+        (bool ok0, uint256 est) = _gas(data);
+        require(ok0, "fixture: the estimate must settle");
+        vm.revertToState(snap);
+        _deposit(s, 20 * SHARE);
+        vm.prank(s);
+        ex.mintSets(M, 10 * SHARE); // the seller's net is now above zero
+        (bool ok1, uint256 used) = _gas(data);
+        require(ok1, "fixture: the call after the action must settle");
+        assertLe(used, est + TOL_PER_PARTY * 2, "a party's own mint made matchOrders dearer than at the estimate");
+    }
+
+    /// @dev Rule 3: the market slot the settlement writes is never zero while the market trades. A mint match writes
+    /// collateral; before inclusion the only holder of sets merges them all away, so without a marker the slot is zero
+    /// and the same write costs a zero-to-nonzero store instead of a rewrite.
+    function test_gasMonotone_rule3_marketSlotStaysNonZero_whenEverySetIsMergedAway() public {
+        delete ps;
+        M = _market(3);
+        (address t, uint256 tk) = _pair("r3-taker");
+        (address a, uint256 ak) = _pair("r3-a");
+        (address b, uint256 bk) = _pair("r3-b");
+        _pair("r3-third");
+        _pair("r3-third-b");
+        address third = ps[3].a;
+        _deposit(t, 100e6);
+        _deposit(a, 100e6);
+        _deposit(b, 100e6);
+        _mint(third, M, 10 * SHARE); // the market's only sets
+        X.Order memory to = _order(t, M, 0, true, 99, 10 * SHARE);
+        X.Order[] memory ms = _two(_order(a, M, 1, true, 20, 10 * SHARE), _order(b, M, 2, true, 30, 10 * SHARE));
+        data = abi.encodeCall(
+            X.matchOrders,
+            (
+                to,
+                _sign(tk, to),
+                ms,
+                _twoSig(_sign(ak, ms[0]), _sign(bk, ms[1])),
+                _twoFill(10 * SHARE, 10 * SHARE),
+                uint128(10 * SHARE)
+            )
+        );
+        uint256 snap = vm.snapshotState();
+        (bool ok0, uint256 est) = _gas(data);
+        require(ok0, "fixture: the estimate must settle");
+        vm.revertToState(snap);
+        vm.prank(third);
+        ex.mergeSets(M, 10 * SHARE); // collateral and feesHeld are both zero now
+        (bool ok1, uint256 used) = _gas(data);
+        require(ok1, "fixture: the call after the action must settle");
+        assertLe(used, est + TOL_PER_PARTY * 3, "a third party's merge made matchOrders dearer than at the estimate");
+    }
+
+    /// @dev Rule 3, read straight from storage: both market slots that settlement writes (collateral and fees; profit and
+    /// unwind pool) hold their marker byte from creation, through minting and merging everything away, trades, and
+    /// the closing of trading.
+    function test_marketMarkers_slotsAreNeverZeroWhileTheMarketTrades() public {
+        M = _market(2);
+        assertTrue(uint256(vm.load(address(ex), _marketSlot(M, 2))) != 0, "collateral/fees slot at creation");
+        assertTrue(uint256(vm.load(address(ex), _marketSlot(M, 3))) != 0, "profit/pool slot at creation");
+        (address a,) = makeAddrAndKey("mk-a");
+        _mint(a, M, 10 * SHARE);
+        vm.prank(a);
+        ex.mergeSets(M, 10 * SHARE); // every set merged away: collateral is zero again
+        assertEq(ex.marketOf(M).collateral, 0);
+        assertEq(ex.marketOf(M).feesHeld, 0);
+        assertTrue(uint256(vm.load(address(ex), _marketSlot(M, 2))) != 0, "collateral/fees slot with nothing in it");
+        assertTrue(uint256(vm.load(address(ex), _marketSlot(M, 3))) != 0, "profit/pool slot with nothing in it");
+        ex.closeEarly(M);
+        assertTrue(uint256(vm.load(address(ex), _marketSlot(M, 2))) != 0);
+        assertTrue(uint256(vm.load(address(ex), _marketSlot(M, 3))) != 0);
     }
 
     function _fundThird(address a, uint256 r) internal {

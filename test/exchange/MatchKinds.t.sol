@@ -193,6 +193,23 @@ contract MatchKindsTest is Scene {
         _expectNoWrite(abi.encodeWithSelector(X.Overfill.selector, _hash(to)), _data(c));
     }
 
+    function test_overfill_filledPlusFillIsSummedInUint256_noWrapAndNoPanic() public {
+        // orders of the largest lot-multiple size; one lot fills first, then a fill of the whole size: filled + fill passes
+        // 2^128, which a uint128 sum would wrap (to a small number that "fits") or panic on
+        uint128 big = type(uint128).max - uint128(uint256(type(uint128).max) % LOT);
+        X.Order memory to = _order(T, m, 0, true, 70, big);
+        X.Order memory mo = _order(A, m, 0, false, 40, big);
+        _settle1(keyOf[T], to, keyOf[A], mo, LOT);
+        Call memory c = _mk(to, _one(mo), big, _oneFill(big));
+        _expectErr(abi.encodeWithSelector(X.Overfill.selector, _hash(to)), _data(c));
+        // the same on the maker's side: a small taker order, a maker that is nearly full
+        X.Order memory to2 = _order(B, m, 0, true, 70, big);
+        X.Order memory mo2 = _order(C, m, 0, false, 40, 2 * LOT);
+        _settle1(keyOf[B], to2, keyOf[C], mo2, LOT);
+        c = _mk(to2, _one(mo2), 2 * LOT, _oneFill(2 * LOT));
+        _expectErr(abi.encodeWithSelector(X.Overfill.selector, _hash(mo2)), _data(c));
+    }
+
     function test_partialFill_makerSideOverfill() public {
         X.Order memory to = _order(T, m, 0, true, 70, 200e6);
         X.Order memory mo = _order(A, m, 0, false, 40, 100e6);
