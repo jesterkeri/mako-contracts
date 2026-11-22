@@ -77,6 +77,14 @@ jobs:
           EXPECT_MONAD_GAS: "true"
         run: forge test --match-path test/exchange/GasMonotone.t.sol
 
+      # The registered order signer's per-party bound (plan 4.2, 4.5: at most 60,000 gas over an honest one-owner Safe) and
+      # the 6 MB isOwner answer that only Monad's linear memory price lets finish are asserted as stated only on that schedule.
+      - name: Registered order signer under Monad's gas schedule
+        env:
+          FOUNDRY_PROFILE: monad
+          EXPECT_MONAD_GAS: "true"
+        run: forge test --match-path test/exchange/RegisteredSigner.t.sol
+
       # PROOF_STANDARD.md Version 3 gates. All offline: no network, no credentials, no chain.
       - name: Rule corpus matches its generator
         run: node script/build-cases.mjs --check
