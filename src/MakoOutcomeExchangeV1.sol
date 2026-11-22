@@ -479,7 +479,9 @@ contract MakoOutcomeExchangeV1 is EIP712 {
 
     /// @notice Plan section 4.5: any account, for itself; never pausable, so an account can always revoke; the zero
     /// address revokes; emits on every call. Replacing or revoking a key voids every order that key signed for the
-    /// account (they are re-signed). An EOA's registration never validates anything (the owner check needs code).
+    /// account (they are re-signed). A plain EOA's registration never validates anything (the owner check needs code);
+    /// an EOA with an EIP-7702 delegation has code, so its delegate's `isOwner` runs under `SIG_GAS` (Mako's intake
+    /// never books that form: such a maker must pass step 1, plan section 4.6).
     function setOrderSigner(address signer) external {
         orderSigner[msg.sender] = signer;
         emit OrderSignerSet(msg.sender, signer);
