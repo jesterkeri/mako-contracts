@@ -494,7 +494,7 @@ contract RegisteredSignerTest is Scene, SafeExec {
         (address key, uint256 k) = makeAddrAndKey("ft");
         address stub = _stubMaker(6, key);
         X.Order memory o = _order(stub, m, 0, false, 40, 10 * SHARE);
-        // the same stub accepts the order through step 2 when the signature does not recover the registered key
+        // the same stub accepts the order through step 2 for a signature that recovers no key (zero bytes)
         assertTrue(_check(o, new bytes(65)), "the stub's EIP-1271 does accept (control)");
         vm.expectCall(stub, abi.encodeWithSelector(IS_VALID_SIG), 0);
         assertFalse(_check(o, _sign(k, o)));
@@ -511,7 +511,7 @@ contract RegisteredSignerTest is Scene, SafeExec {
 
     // ------------------------------------------------------------------------------------------------ the other branches of step 1b
     function test_otherSignerForRegisteredMaker_refused() public {
-        // a registered maker, a signature recovering a third address: step 1b is skipped, step 2 refuses
+        // a registered maker, a signature recovering a third address: refused at step 1b, with no step 2
         (, address own, address mm) = _safe("third");
         _register(mm, own, own);
         (, uint256 sk) = makeAddrAndKey("third-signer");
@@ -534,5 +534,143 @@ contract RegisteredSignerTest is Scene, SafeExec {
         X.Order memory o = _order(e, m, 0, false, 40, 10 * SHARE);
         assertFalse(_check(o, _sign(kk, o)), "the registered key has no code to check an owner on");
         assertTrue(_check(o, _sign(ek, o)), "its own key still signs for it (step 1)");
+    }
+
+    // ------------------------------------------------------------------------------------------------ a key-recovering signature never reaches EIP-1271
+    // Adversary pass on c7b6135. Plan 4.6 "What this leaves": if the owner changes owners between the settler's check and
+    // inclusion, "the check fails rather than costing more"; plan 3.1 rule 4: nothing a party does on its own raises
+    // settlement gas by more than 3,000. The attack: a one-owner Safe signs plainly with its registered owner key O (step
+    // 1b). The same 65 bytes also recover some address P over the Safe's message hash, so the Safe adds P as an owner and
+    // changes or revokes its registration; had step 2 run, the SAME bytes would then pass it at about 25,000 more gas.
+
+    function _safeMsgHash(address safe, bytes32 h) internal view returns (bytes32) {
+        bytes32 domain = keccak256(abi.encode(SAFE_DOMAIN_TYPEHASH, vm.getChainId(), safe));
+        return keccak256(
+            abi.encodePacked(
+                hex"1901", domain, keccak256(abi.encode(SAFE_MSG_TYPEHASH, keccak256(abi.encodePacked(h))))
+            )
+        );
+    }
+
+    /// @dev The address the 65 bytes recover over the Safe's message hash (what the Safe's own plain-ECDSA branch reads).
+    function _extraOwner(address safe, X.Order memory mo, bytes memory sg) internal view returns (address p) {
+        bytes32 r;
+        bytes32 sv;
+        uint8 v;
+        assembly {
+            r := mload(add(sg, 0x20))
+            sv := mload(add(sg, 0x40))
+            v := byte(0, mload(add(sg, 0x60)))
+        }
+        p = ecrecover(_safeMsgHash(safe, _hash(mo)), v, r, sv);
+    }
+
+    /// @dev The Safe's own two acts: add P as an owner (threshold 1), then register `to` (address(0) revokes).
+    function _switch(address safe, address owner, address p, address to) internal {
+        _safeExec(safe, owner, safe, abi.encodeWithSignature("addOwnerWithThreshold(address,uint256)", p, 1));
+        _safeExec(safe, owner, address(ex), abi.encodeCall(X.setOrderSigner, (to)));
+    }
+
+    function _switchRefuses(address to) internal {
+        (uint256 pk, address owner, address safe) = _safe(string.concat("switch-", vm.toString(to)));
+        _register(safe, owner, owner);
+        X.Order memory o = _order(safe, m, 0, false, 40, 10 * SHARE);
+        bytes memory sig = _sign(pk, o);
+        assertTrue(_check(o, sig), "the registered path accepts");
+        address p = _extraOwner(safe, o, sig);
+        assertTrue(p != address(0) && p != owner);
+        _switch(safe, owner, p, to);
+        assertTrue(ISafeExec(safe).isOwner(p), "P is now an owner: step 2 would accept these bytes");
+        vm.expectCall(safe, abi.encodeWithSelector(IS_VALID_SIG), 0);
+        assertFalse(_check(o, sig), "the same bytes are refused, never re-checked by EIP-1271");
+    }
+
+    function test_keyRecoveringSig_afterRegistrationMoved_refusedNotDearer() public {
+        _switchRefuses(makeAddr("other-key"));
+    }
+
+    function test_keyRecoveringSig_afterRevoke_refusedNotDearer() public {
+        _switchRefuses(address(0));
+    }
+
+    function test_keyRecoveringSig_unregisteredContract_neverCallsIsValidSignature() public {
+        // a maker whose EIP-1271 accepts anything (and whose isOwner says no)
+        address stub = address(new OwnerStub(6));
+        (, uint256 k) = makeAddrAndKey("plain-to-1271");
+        X.Order memory o = _order(stub, m, 0, false, 40, 10 * SHARE);
+        // control: a signature that recovers no key (v + 4) does reach step 2, and is accepted
+        bytes memory v4 = _sign(k, o);
+        v4[64] = bytes1(uint8(v4[64]) + 4);
+        assertTrue(_check(o, v4), "control: step 2 still runs for a signature that recovers no key");
+        // a plain signature recovering any key is refused without the call
+        vm.expectCall(stub, abi.encodeWithSelector(IS_VALID_SIG), 0);
+        assertFalse(_check(o, _sign(k, o)));
+    }
+
+    function _coolAll(address[] memory safes) internal {
+        vm.cool(address(ex));
+        vm.cool(operator);
+        vm.cool(address(usd));
+        vm.cool(T);
+        vm.cool(SAFE_SINGLETON);
+        vm.cool(SAFE_MODULE);
+        for (uint256 i; i < safes.length; ++i) {
+            vm.cool(safes[i]);
+        }
+        ex.MAX_MAKERS();
+    }
+
+    /// @dev A direct buy of n x 10 shares against n registered one-owner Safes: estimate at gas price 0, then (if
+    /// `doSwitch`) each Safe's own two acts, then sent at the settler limit (ceil(est x 1.10) to 1,000).
+    function _settlerLimitRun(uint256 n, bool doSwitch)
+        internal
+        returns (bool ok, bytes memory ret, uint256 est, uint256 limit, bytes32 firstMakerHash)
+    {
+        address[] memory safes = new address[](n);
+        address[] memory owners = new address[](n);
+        X.Order[] memory ms = new X.Order[](n);
+        bytes[] memory sigs = new bytes[](n);
+        uint128[] memory fs = new uint128[](n);
+        address[] memory extra = new address[](n);
+        X.Order memory to = _order(T, m, 0, true, 50, n * 10 * SHARE);
+        for (uint256 i; i < n; ++i) {
+            uint256 pk;
+            (pk, owners[i], safes[i]) = _safe(string.concat("oog-maker-", vm.toString(i)));
+            _register(safes[i], owners[i], owners[i]);
+            _fundAddr(safes[i], 0, 100 * SHARE);
+            ms[i] = _order(safes[i], m, 0, false, 40, 10 * SHARE);
+            sigs[i] = _sign(pk, ms[i]);
+            fs[i] = uint128(10 * SHARE);
+            extra[i] = _extraOwner(safes[i], ms[i], sigs[i]);
+        }
+        firstMakerHash = _hash(ms[0]);
+        bytes memory data = _call(to, _sign(keyOf[T], to), ms, sigs, fs, n * 10 * SHARE);
+        uint256 snap = vm.snapshotState();
+        vm.txGasPrice(0);
+        _coolAll(safes);
+        vm.prank(operator);
+        uint256 g0 = gasleft();
+        (bool ok0,) = address(ex).call(data);
+        est = g0 - gasleft();
+        assertTrue(ok0, "the estimate settles");
+        vm.revertToState(snap);
+        limit = ((est * 11 + 9) / 10 + 999) / 1000 * 1000;
+        for (uint256 i; doSwitch && i < n; ++i) {
+            _switch(safes[i], owners[i], extra[i], makeAddr("other-key"));
+        }
+        _coolAll(safes);
+        vm.prank(operator);
+        (ok, ret) = address(ex).call{gas: limit}(data);
+    }
+
+    function test_settlerLimit_fourRegisteredSafes_noSwitch_settles() public {
+        (bool ok,,,,) = _settlerLimitRun(4, false);
+        assertTrue(ok, "control: without the switch the sent call settles at the limit");
+    }
+
+    function test_settlerLimit_fourRegisteredSafes_switch_revertsBadSignature_neverOutOfGas() public {
+        (bool ok, bytes memory ret,,, bytes32 h0) = _settlerLimitRun(4, true);
+        assertFalse(ok);
+        assertEq(ret, _expectBad(h0), "the first switched maker's BadSignature, not an unnamed out-of-gas");
     }
 }

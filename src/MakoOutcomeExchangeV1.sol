@@ -497,7 +497,8 @@ contract MakoOutcomeExchangeV1 is EIP712 {
     }
 
     /// @dev The shared checker (plan section 4.4), called by `matchOrders` for every party and by
-    /// `isValidOrderSignature`. Step 0 length, step 1 ECDSA, step 1b registered signer, step 2 bounded EIP-1271.
+    /// `isValidOrderSignature`. Step 0 length, step 1 ECDSA, step 1b registered signer, step 2 bounded EIP-1271, which
+    /// only a signature that recovers no key reaches (a Safe's `v + 4` form, a contract signature).
     function _checkOrderSig(address maker, bytes32 orderHash, bytes calldata sig) internal view returns (bool) {
         if (sig.length == 0 || sig.length > MAX_SIG_LEN) revert BadSignatureLength(orderHash); // before any copy or call
         bytes memory s = sig; // at most 195 bytes
@@ -508,6 +509,11 @@ contract MakoOutcomeExchangeV1 is EIP712 {
             // failed owner check never falls through to EIP-1271 (a stale key passes by no other route).
             address r = orderSigner[maker];
             if (r != address(0) && rec == r) return maker.code.length != 0 && _boundedIsOwner(maker, r);
+            // A signature that recovers a key is decided by steps 1 and 1b alone, never by EIP-1271. Otherwise the same
+            // bytes, accepted through 1b at the settler's check, could pass step 2 at more gas when sent: the Safe adds
+            // the address they recover over its message hash as an owner, then changes or revokes its registration
+            // (adversary pass on c7b6135; plan 4.6 "the check fails rather than costing more").
+            return false;
         }
         if (maker.code.length == 0) return false;
         return _bounded1271(maker, orderHash, s); // step 2
