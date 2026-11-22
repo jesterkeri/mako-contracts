@@ -13,8 +13,9 @@
 //   - The three functions that take an `Order` are matchOrders (0xe4ff4ef4), isValidOrderSignature (0x2d075cbf) and
 //     cancelOrders (0x39ccdd5d), and no other function takes a tuple (plan 4.4). r6's matchOrders without signatures
 //     (0x2399e413) and every other matchOrders overload must not exist (plan 3.1, r7).
-//   - The registered order signer is ABSENT (plan 10.1, Q10): no setOrderSigner, orderSigner or OrderSignerSet, by name and
-//     by selector. If the S1 decision record says the fallback fired, adding it is a reviewed change to THIS file.
+//   - The registered order signer is PRESENT (plan 4.5; the S1 decision record of 2026-11-22 says the fallback fired):
+//     setOrderSigner(address) 0x937832f9, orderSigner(address) 0x585dcd19, the event OrderSignerSet(address,address) with
+//     both arguments indexed, `orderSigner` in storage right after `nonces`, and `_boundedIsOwner` in the source.
 //   - matchOrders is the only function gated on isOperator (plan 3.1 "Access control", O8), by source.
 //   - No setter for a market term, no proxy, no delegatecall, no selfdestruct, fees only to the immutable TREASURY.
 //   - The storage layout, slot by slot.
@@ -57,6 +58,7 @@ const FUNCTIONS = {
   'mergeSets(uint256,uint256)': ['nonpayable', '03ccf5ba'],
   'mintSets(uint256,uint256)': ['nonpayable', '78c530fc'],
   'nonces(address)': ['view', '7ecebe00'],
+  'orderSigner(address)': ['view', '585dcd19'],
   'orders(bytes32)': ['view', '9c3f1e90'],
   'paused()': ['view', '5c975abb'],
   'pendingAdmin()': ['view', '26782247'],
@@ -67,6 +69,7 @@ const FUNCTIONS = {
   'resolver()': ['view', '04f3bcec'],
   'setOperator(address,bool)': ['nonpayable', '558a7297'],
   'setPaused(bool)': ['nonpayable', '16c38b3c'],
+  'setOrderSigner(address)': ['nonpayable', '937832f9'],
   'setResolver(address)': ['nonpayable', '4e543b26'],
   'splitOf(uint256,address,uint256)': ['view', '12c66c5e'],
   'transferAdmin(address)': ['nonpayable', '75829def'],
@@ -82,14 +85,10 @@ const ORDER_TAKERS = {
   [`cancelOrders(${ORDER}[])`]: '39ccdd5d',
 };
 
-// Selectors that must never exist: r6's matchOrders (no signatures), and the registered order signer (plan 4.5), whose
-// selectors were derived with `cast sig` on 2026-11-20.
+// Selectors that must never exist: r6's matchOrders (no signatures).
 const ABSENT = {
   '2399e413': 'matchOrders without signatures (r6, withdrawn by r7)',
-  '937832f9': 'setOrderSigner(address): the registered order signer is not built (plan 10.1, Q10)',
-  '585dcd19': 'orderSigner(address): the registered order signer is not built (plan 10.1, Q10)',
 };
-const ABSENT_NAMES = /^(setOrderSigner|orderSigner|OrderSignerSet)$/;
 
 // Every custom error and event of the ABI, by name. (The EIP-712 library's errors are included: they are part of the
 // compiled surface.)
@@ -104,7 +103,7 @@ const ERRORS = [
 ];
 const EVENTS = [
   'AdminTransferStarted', 'AdminTransferred', 'Cancelled', 'Deposited', 'EIP712DomainChanged', 'Finalized', 'Leaf',
-  'MarketCreated', 'NonceIncremented', 'OperatorSet', 'OutcomeProposed', 'PausedSet', 'Redeemed', 'ResolverSet',
+  'MarketCreated', 'NonceIncremented', 'OperatorSet', 'OrderSignerSet', 'OutcomeProposed', 'PausedSet', 'Redeemed', 'ResolverSet',
   'SetsMerged', 'SetsMinted', 'TakerLeaf', 'TradingClosedEarly', 'TreasuryWithdrawn', 'Withdrawn',
 ];
 
@@ -115,6 +114,7 @@ const STORAGE = [
   '_markets:t_mapping(t_uint256,t_struct(MarketS))', '_cash:t_mapping(t_address,t_uint256)',
   '_sharesS:t_mapping(t_bytes32,t_uint256)', '_rec:t_mapping(t_bytes32,t_struct(NetRec))',
   'orders:t_mapping(t_bytes32,t_struct(OrderState))', 'nonces:t_mapping(t_address,t_uint256)',
+  'orderSigner:t_mapping(t_address,t_address)',
   'isOperator:t_mapping(t_address,t_bool)',
 ];
 
@@ -159,9 +159,13 @@ for (const f of fns) {
 }
 for (const sig of Object.keys(ORDER_TAKERS)) if (!seen.has(sig)) problems.push(`the plan 4.4 function is missing: ${sig}`);
 
-// ---- the registered order signer is absent ----
-for (const x of abi) {
-  if (ABSENT_NAMES.test(x.name ?? '')) problems.push(`${x.type} ${x.name}: the registered order signer is not built (plan 10.1, Q10)`);
+// ---- the registered order signer is present, with the plan 4.5 event shape ----
+{
+  const ev = abi.filter((x) => x.type === 'event' && x.name === 'OrderSignerSet');
+  const shape = (e) => `${e.name}(${e.inputs.map((i) => `${i.type}${i.indexed ? ' indexed' : ''}`).join(',')})`;
+  if (ev.length !== 1 || shape(ev[0]) !== 'OrderSignerSet(address indexed,address indexed)') {
+    problems.push(`event OrderSignerSet(address indexed,address indexed) missing or changed (found: ${ev.map(shape).join('; ') || 'none'})`);
+  }
 }
 
 // ---- errors and events ----
@@ -218,8 +222,9 @@ if (compiled) {
     if (new RegExp(`\\b${w}\\b`).test(src)) problems.push(`the source uses ${w}`);
   }
   if (/\b(upgradeTo|upgradeToAndCall|_implementation|initialize|Proxy)\b/.test(src)) problems.push('the source mentions a proxy or an upgrade hook');
-  // the registered signer is absent from the source too
-  if (/\b(setOrderSigner|orderSigner|_boundedIsOwner|OrderSignerSet)\b/.test(src)) problems.push('the registered order signer appears in the source (plan 10.1, Q10)');
+  // the registered signer is in the source: the bounded owner check with isOwner selector 0x2f54bf6e, once
+  if (!/function\s+_boundedIsOwner\b/.test(src)) problems.push('_boundedIsOwner is missing from the source (plan 4.5)');
+  if ((src.match(/0x2f54bf6e/g) ?? []).length !== 1) problems.push('the isOwner(address) selector 0x2f54bf6e must appear exactly once in the source (plan 4.5)');
 
   // fees go to the immutable TREASURY only: the two places money leaves are withdraw (to the caller) and withdrawTreasury
   if (!/address\s+public\s+immutable\s+TREASURY\b/.test(src)) problems.push('TREASURY is not declared `address public immutable`');
@@ -266,5 +271,5 @@ if (problems.length) {
   process.exit(1);
 }
 console.log('\n  every function pinned by signature, mutability and selector; exactly three take an Order; r6 matchOrders (0x2399e413) absent.');
-console.log('  the registered order signer (setOrderSigner, orderSigner, OrderSignerSet) is absent.');
+console.log('  the registered order signer (setOrderSigner 0x937832f9, orderSigner 0x585dcd19, OrderSignerSet, storage after nonces) is present.');
 console.log('  isOperator[msg.sender] only in matchOrders; no delegatecall; fees only to the immutable TREASURY; no setter for a market term; storage exactly the allowlist.');

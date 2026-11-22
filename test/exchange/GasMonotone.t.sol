@@ -15,8 +15,8 @@ import {MakoOutcomeExchangeV1 as X} from "../../src/MakoOutcomeExchangeV1.sol";
 /// incrementNonce), and measures the same call again. An action that makes the call revert (the order
 /// itself invalid: cash, shares, nonce) is undone and skipped; those revert with named errors and are tested elsewhere.
 ///
-/// Asserts gas_after <= estimate + TOL_PER_PARTY per party (taker plus makers). The registered signer of the spike's
-/// action list (`setOrderSigner`) is not part of this build.
+/// Asserts gas_after <= estimate + TOL_PER_PARTY per party (taker plus makers). The action list includes the registered
+/// signer's `setOrderSigner` (plan 4.5): set, replace or revoke by a party or anyone, once per run (`_signerAction`).
 contract GasMonotoneTest is ExchangeBase {
     /// @notice Canary for the CI step that runs this file with `FOUNDRY_PROFILE=monad` (adversary pass 1): a skipped
     /// cash write shows against the 3,000-gas per-party bound only under Monad's gas schedule, so that step must prove
@@ -116,6 +116,7 @@ contract GasMonotoneTest is ExchangeBase {
             vm.revertToState(pr);
             if (!ok) vm.revertToState(pre);
         }
+        _signerAction(seed);
 
         (bool okA, uint256 used) = _gas(data);
         require(okA, "fixture: the call after the actions must settle");
@@ -128,6 +129,29 @@ contract GasMonotoneTest is ExchangeBase {
         assertLe(
             used, est + TOL_PER_PARTY * nParties, "a party's own action made matchOrders dearer than at the estimate"
         );
+    }
+
+    /// @dev Plan 4.5: a party (or anyone, for itself) can call `setOrderSigner` between the estimate and inclusion: set a
+    /// key, replace it, or revoke it with the zero address. It runs after the other actions (it never changes the other
+    /// actions' draws, so the earlier counterexample seeds keep their meaning) in 3 seeds of 4, from a party of the call
+    /// (3 in 4) or a third party. Under the same revert rule as the rest: a call it makes revert is undone and skipped.
+    /// The parties here are EOAs signing with their own key, which step 1 accepts before step 1b is reached, so the
+    /// action must leave the call's gas unchanged; a registered Safe's revoke or swap makes the call revert
+    /// (`RegisteredSigner.t.sol` (af), (ag)) rather than dearer.
+    function _signerAction(uint256 seed) internal {
+        uint256 r = _r(seed, 777);
+        if (r % 4 == 0) return;
+        address a = ps[(r >> 8) & 3 != 0 ? (r >> 16) % (ps.length - 2) : (r >> 16) % ps.length].a;
+        address key = (r >> 40) % 3 == 0 ? address(0) : address(uint160(uint256(keccak256(abi.encode(r, "key")))));
+        uint256 pre = vm.snapshotState();
+        bool done = _try(a, abi.encodeCall(ex.setOrderSigner, (key)));
+        if (done && key != address(0) && (r >> 50) & 1 == 1) {
+            done = _try(a, abi.encodeCall(ex.setOrderSigner, (address(0))));
+        }
+        uint256 pr = vm.snapshotState();
+        (bool ok,) = _gas(data);
+        vm.revertToState(pr);
+        if (!done || !ok) vm.revertToState(pre);
     }
 
     function _gas(bytes memory d) internal returns (bool ok, uint256 used) {

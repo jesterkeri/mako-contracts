@@ -257,7 +257,7 @@
   "exchange": {
     "$comment": [
       "OFFCHAIN_MATCHING_PLAN.md 10.2 for MakoOutcomeExchangeV1: X1 to X12 and X15 to X20 of MAKO_POOLS_PLAN 9.3 as reworded there, O1 to O13, plus G1.",
-      "X13, X14 and X21 are book-only and are removed with the book. O14 (and everything of plan 4.5) exists only with the registered order signer, which this build does not carry.",
+      "X13, X14 and X21 are book-only and are removed with the book. O14 and plan 4.5 (the registered order signer) are covered by test/exchange/RegisteredSigner.t.sol.",
       "script/check-invariants.mjs checks every named test is a real public test or invariant function in test/exchange/*.t.sol."
     ],
     "source": "OFFCHAIN_MATCHING_PLAN.md r31 draft 7, 10.2",
@@ -416,7 +416,7 @@
           "test_binding_aSignatureForAnotherExchangeIsRefused",
           "test_ecdsa_everyFieldIsSigned",
           "test_step5_marketMismatch_beforeEveryLaterCheck",
-          "test_vectors_negativesRevertExactly_registeredOnesAtTheTaker"
+          "test_vectors_all26NegativesRevertExactly_registeredOnesAtTheMaker"
         ]
       },
       "O3": {
