@@ -85,6 +85,14 @@ jobs:
           EXPECT_MONAD_GAS: "true"
         run: forge test --match-path test/exchange/RegisteredSigner.t.sol
 
+      # The signer's cost after the party's own actions (plan 3.1 rule 4) and the SIG_GAS reserve at 1-gas resolution, on
+      # the schedule the bound was measured on (adversary pass on b33c90e).
+      - name: Registered order signer cost drift and gas reserve under Monad's gas schedule
+        env:
+          FOUNDRY_PROFILE: monad
+          EXPECT_MONAD_GAS: "true"
+        run: forge test --match-path 'test/exchange/{SignerCostDrift,SignerGuardSweep,Delegated7702}.t.sol'
+
       # PROOF_STANDARD.md Version 3 gates. All offline: no network, no credentials, no chain.
       - name: Rule corpus matches its generator
         run: node script/build-cases.mjs --check
