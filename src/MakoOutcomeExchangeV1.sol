@@ -18,10 +18,9 @@ interface IExchangeToken {
 /// `MAKO_POOLS_PLAN.md` r20 section 9.1 (markets, ledger, profit hold, resolution). The S1 spike
 /// (`.claude/s1-spike/src/SpikeSettle.sol`) was the reference for the settlement path and its storage rules.
 ///
-/// NOT in this version, on purpose: the registered order signer (`setOrderSigner`, `orderSigner`, checker step 1b,
-/// `_boundedIsOwner`, plan section 4.5). It is built only if the S1 decision record says the fallback fired
-/// (plan section 10.1, Q10). The checker below is structured so that step 1b can be added at the marked place and
-/// nowhere else; `script/check-surface-exchange.mjs` pins its absence.
+/// The registered order signer (`setOrderSigner`, `orderSigner`, checker step 1b, `_boundedIsOwner`, plan section 4.5)
+/// is included: the S1 decision record (`S1_SPIKE_RESULTS.md` section 5, 2026-11-22) says the locked fallback fired
+/// (rule 1 not met with Safe parties, the registered re-measurement met). Ported from the S1 spike unchanged.
 ///
 /// STORAGE RULES FOR GAS (plan section 3.1 "Settlement gas cannot be raised between estimate and inclusion", r31 d5,
 /// d6). Nothing a party or a third party does between the settler's estimate and inclusion may make `matchOrders`
@@ -157,6 +156,9 @@ contract MakoOutcomeExchangeV1 is EIP712 {
     mapping(bytes32 => NetRec) internal _rec; // key(market, wallet)
     mapping(bytes32 => OrderState) public orders;
     mapping(address => uint256) public nonces;
+    /// @notice Plan section 4.5: the one key whose plain ECDSA order signatures count for an account while that key is
+    /// still an owner of the account (checked by `_boundedIsOwner` at every check).
+    mapping(address => address) public orderSigner;
     mapping(address => bool) public isOperator;
 
     // ------------------------------------------------------------------------------------------------ events
@@ -195,6 +197,7 @@ contract MakoOutcomeExchangeV1 is EIP712 {
     event Cancelled(bytes32 indexed orderHash, address indexed maker);
     event NonceIncremented(address indexed account, uint256 nonce);
     event OperatorSet(address indexed account, bool enabled);
+    event OrderSignerSet(address indexed account, address indexed signer);
     event ResolverSet(address indexed resolver);
     event AdminTransferStarted(address indexed pendingAdmin);
     event AdminTransferred(address indexed admin);
@@ -474,6 +477,14 @@ contract MakoOutcomeExchangeV1 is EIP712 {
         emit NonceIncremented(msg.sender, n);
     }
 
+    /// @notice Plan section 4.5: any account, for itself; never pausable, so an account can always revoke; the zero
+    /// address revokes; emits on every call. Replacing or revoking a key voids every order that key signed for the
+    /// account (they are re-signed). An EOA's registration never validates anything (the owner check needs code).
+    function setOrderSigner(address signer) external {
+        orderSigner[msg.sender] = signer;
+        emit OrderSignerSet(msg.sender, signer);
+    }
+
     // ------------------------------------------------------------------------------------------------ signatures
     /// @dev Plan section 4.1. No function other than the three of section 4.4 takes an `Order`, so this is internal.
     function _hashOrder(Order calldata o) internal view returns (bytes32) {
@@ -486,14 +497,18 @@ contract MakoOutcomeExchangeV1 is EIP712 {
     }
 
     /// @dev The shared checker (plan section 4.4), called by `matchOrders` for every party and by
-    /// `isValidOrderSignature`. Step 0 length, step 1 ECDSA, step 2 bounded EIP-1271.
+    /// `isValidOrderSignature`. Step 0 length, step 1 ECDSA, step 1b registered signer, step 2 bounded EIP-1271.
     function _checkOrderSig(address maker, bytes32 orderHash, bytes calldata sig) internal view returns (bool) {
         if (sig.length == 0 || sig.length > MAX_SIG_LEN) revert BadSignatureLength(orderHash); // before any copy or call
         bytes memory s = sig; // at most 195 bytes
         (address rec, ECDSA.RecoverError err,) = ECDSA.tryRecover(orderHash, s);
-        if (err == ECDSA.RecoverError.NoError && rec == maker) return true; // step 1
-        // [r31 step 1b, registered order signer (plan section 4.5): NOT BUILT. It would read the registry here, only
-        // when `err == NoError` and `rec != maker`, and be final when the recovered key is the registered one.]
+        if (err == ECDSA.RecoverError.NoError) {
+            if (rec == maker) return true; // step 1
+            // step 1b (plan section 4.5): the one storage read. Final when the recovered key is the registered one, so a
+            // failed owner check never falls through to EIP-1271 (a stale key passes by no other route).
+            address r = orderSigner[maker];
+            if (r != address(0) && rec == r) return maker.code.length != 0 && _boundedIsOwner(maker, r);
+        }
         if (maker.code.length == 0) return false;
         return _bounded1271(maker, orderHash, s); // step 2
     }
@@ -516,6 +531,21 @@ contract MakoOutcomeExchangeV1 is EIP712 {
             mstore(add(add(ptr, 0x64), sigLen), 0)
             let ok := staticcall(gasLimit, maker, ptr, add(and(add(sigLen, 0x1f), not(0x1f)), 0x64), 0x00, 0x20)
             valid := and(ok, and(gt(returndatasize(), 0x1f), eq(mload(0x00), shl(224, 0x1626ba7e))))
+        }
+    }
+
+    /// @dev Plan section 4.5: the block above with `isOwner(address)` (0x2f54bf6e) and the key as the call, accepted only
+    /// if the call succeeded, returned at least 32 bytes and the word is 1. Same reserve check, `SIG_GAS` and constant
+    /// scratch output; no `returndatacopy`.
+    function _boundedIsOwner(address maker, address key) internal view returns (bool valid) {
+        if (gasleft() < SIG_GAS + SIG_GAS / 63 + CALL_OVERHEAD) revert InsufficientGas();
+        uint256 gasLimit = SIG_GAS;
+        assembly ("memory-safe") {
+            let ptr := mload(0x40)
+            mstore(ptr, shl(224, 0x2f54bf6e))
+            mstore(add(ptr, 0x04), key)
+            let ok := staticcall(gasLimit, maker, ptr, 0x24, 0x00, 0x20)
+            valid := and(ok, and(gt(returndatasize(), 0x1f), eq(mload(0x00), 1)))
         }
     }
 
